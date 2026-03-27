@@ -81,9 +81,8 @@ and the repository exists.
 git switch --track origin/claud4
 ```
 
-如果本地已经有这个分支：
-
 ```sh
+# 如果本地已经有这个分支：
 git switch claud4
 ```
 
