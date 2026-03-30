@@ -1,0 +1,26 @@
+# gitconfig文件
+[user]
+  name = bergman
+  email = 2025.1103sequoia@macstudio2022
+[core]
+  quotepath =false
+  editor = mate --wait
+  #! 这里千万记得要改为真实地址, 全局ignore配置mac的DS_store文件: echo ".DS_Store" >> .gitignore
+  excludesfile = /Users/machangkun/x/.gitignore_g
+[pull]
+	rebase = true
+[push]
+  default = simple
+	autoSetupRemote = true
+# 处理大文件, 可以放在每个项目的目录下的.git/config
+[alias]
+  track-large = "!git st --porcelain --ignore-submodules | grep -v 'D ' | cut -b4- | sed -n 's/\\(\\(.* -> \\)\\|\\)\\(.\\)/\\3/p' | xargs -I{} find {} -size +300k | xargs -I{} git lfs track {}"
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true
+[branch]
+	autoSetupRebase = always
+[checkout]
+	defaultRemote = origin
