@@ -1,3 +1,52 @@
+#### 5.14
+* 我想把kimi2.6配置给claude code用, 我想把kimi2.6配置给claude code 用, 你能给我一个能用的json样例吗? 
+1. kimi官方支持anthopic的. 你上网查一下.
+2. kimi有2种key的配置, 你在本地查一下kimi code的配置, 帮我确认下我的key是哪一种配置
+
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-kimi-",
+    "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "ANTHROPIC_SMALL_FAST_MODEL": "kimi-for-coding"
+  },
+  "permissions": {
+    "allow": ["Bash", "Read", "Write", "Edit"],
+    "defaultMode": "acceptEdits"
+  }
+}
+
+安装claude.md#21-32
+我让另一个ai找, 他找到了这个:
+  {
+    "env": {
+      "ANTHROPIC_BASE_URL": "https://api.moonshot.ai/anthropic",
+      "ANTHROPIC_AUTH_TOKEN": "你的moonshot_api_key",
+      "ANTHROPIC_MODEL": "kimi-k2.6",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "kimi-k2.6",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k2.6",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kimi-k2.6",
+      "CLAUDE_CODE_SUBAGENT_MODEL": "kimi-k2.6"
+    }
+  }这个对吗?
+
+* 可是别的ai说你搞错了, sk-kimi这种key要用这个url:     "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/",
+
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding",
+    "ANTHROPIC_AUTH_TOKEN": "sk-kimi-",
+    "ANTHROPIC_MODEL": "kimi-k2.6",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "kimi-k2.6",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k2.6",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kimi-k2.6",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "kimi-k2.6",
+    "ENABLE_TOOL_SEARCH": "false",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+
 #### 4.22
 * 10:17
 * claude code 好安装吗?
