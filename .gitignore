@@ -235,3 +235,11 @@ Temporary Items
 # macOS specific
 *.icloud
 *.lockfile
+
+
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+*.bz2
