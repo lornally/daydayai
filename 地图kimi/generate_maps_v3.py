@@ -185,7 +185,14 @@ def rotate_image(img, center_lon, center_lat):
 
 
 # ---- Load base terrain image ----
-base_img_path = str(PathLib(cartopy.config['repo_data_dir']) / 'raster' / 'natural_earth' / '50-natural-earth-1-downsampled.png')
+# Use high-res NASA Blue Marble Shaded Relief
+base_img_path = os.path.join(OUTPUT_DIR, 'blue_marble_10800x5400.jpg')
+if not os.path.exists(base_img_path):
+    print("Downloading high-res terrain from NASA GIBS...")
+    import urllib.request
+    url = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&LAYERS=BlueMarble_ShadedRelief_Bathymetry&VERSION=1.1.1&FORMAT=image/jpeg&SRS=EPSG:4326&BBOX=-180,-90,180,90&WIDTH=10800&HEIGHT=5400"
+    urllib.request.urlretrieve(url, base_img_path)
+    print("Download complete.")
 base_img = imread(base_img_path)
 print(f"Base terrain image: {base_img.shape}")
 
