@@ -243,3 +243,6 @@ Temporary Items
 *.tar
 *.gz
 *.bz2
+*.png
+*.jpg
+*.nc
