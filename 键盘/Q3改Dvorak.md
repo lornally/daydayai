@@ -39,6 +39,8 @@
 键盘改键教程：https://www.lanzoub.com/b05l42zfi
 密码:1234
 
+渴创键盘刷固件教程：https://wwbq.lanzoub.com/b00rna0g9c 密码:1234
+
 哦, 就是没毛病就别刷固件呗.....
 
 ### 问kimi
