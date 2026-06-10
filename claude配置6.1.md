@@ -9,7 +9,7 @@
 
 {
   "env": {
-    "ANTHROPIC_AUTH_TOKEN": "[REDACTED_DESTROYED_KEY]",
+    "ANTHROPIC_AUTH_TOKEN": "sk-",
     "ANTHROPIC_BASE_URL": "https://xuanji.hungrypanda.it",
     "ANTHROPIC_MODEL": "claude-opus-4-7",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-opus-4-7",
