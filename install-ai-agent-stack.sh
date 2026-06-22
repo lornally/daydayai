@@ -77,6 +77,14 @@ install_context7_skill() {
   [[ -d "$PROJECT" ]] && install_skill_file "$src" "$PROJECT/.agents/skills" context7-mcp
 }
 
+install_docs_trim() {
+  local src="$ROOT/docs-trim/SKILL.md"
+  [[ -f "$src" ]] || return 0
+  install_skill_file "$src" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills" docs-trim
+  install_skill_file "$src" "${CODEX_HOME:-$HOME/.codex}/skills" docs-trim
+  [[ -d "$PROJECT" ]] && install_skill_file "$src" "$PROJECT/.agents/skills" docs-trim
+}
+
 disable_serena_dashboard_autopen() {
   local cfg="$HOME/.serena/serena_config.yml"
   [[ -f "$cfg" ]] || return 0
@@ -183,6 +191,7 @@ main() {
   clone_or_update git@github.com:upstash/context7.git "$TOOLS_DIR/context7"
 
   install_bugfix_protocol
+  install_docs_trim
   install_context7_skill
   disable_serena_dashboard_autopen
   install_claude_plugins

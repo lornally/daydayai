@@ -1,117 +1,128 @@
 # AI Agent Stack
 
-Installs:
+安装：
 
-- Ponytail: minimal-code mode.
-- Caveman: terse-output mode.
-- Bugfix Protocol: doc -> red test -> minimal fix -> green stop.
-- Serena MCP: semantic code tools.
-- Context7 MCP/skill: current library docs.
+- Ponytail：少写代码。
+- Caveman：少说废话。
+- Bugfix Protocol：文档 -> 红测 -> 最小修 -> 绿停。
+- Docs Trim：文档瘦身。
+- Serena MCP：语义级读代码。
+- Context7 MCP/skill：查最新库文档。
 
-## Install
+## 安装
 
-From this repo:
+在本仓库运行：
 
 ```bash
 chmod +x install-ai-agent-stack.sh
 ./install-ai-agent-stack.sh /path/to/your/project
 ```
 
-Optional Context7 key:
+可选：Context7 key。
 
 ```bash
 export CONTEXT7_API_KEY='ctx7sk_...'
 ./install-ai-agent-stack.sh /path/to/your/project
 ```
 
-No key also works, with lower rate limits.
+无 key 也能用，限额低。
 
-The script clones/upgrades tools under:
+工具默认 clone/更新到：
 
 ```text
 $TOOLS_DIR
 ```
 
-Default:
+默认值：
 
 ```text
 ~/AI/参考工具
 ```
 
-Override:
+指定目录：
 
 ```bash
 TOOLS_DIR="$HOME/AI/tools" ./install-ai-agent-stack.sh /path/to/project
 ```
 
-## What It Writes
+## 写入位置
 
-Claude Code:
+Claude Code：
 
 - `~/.claude/skills/bugfix-protocol`
+- `~/.claude/skills/docs-trim`
 - `~/.claude/skills/context7-mcp`
-- Claude plugins: `ponytail`, `caveman`
-- MCP servers: `serena`, `context7`
+- 插件：`ponytail`、`caveman`
+- MCP：`serena`、`context7`
 
-Codex:
+Codex：
 
 - `~/.codex/skills/bugfix-protocol`
+- `~/.codex/skills/docs-trim`
 - `~/.codex/skills/context7-mcp`
-- Codex plugin: `ponytail`
-- Codex Caveman skills via `skills add`
-- MCP servers: `serena`, `context7`
+- 插件：`ponytail`
+- Caveman skills
+- MCP：`serena`、`context7`
 
-Project:
+项目：
 
 - `.agents/skills/bugfix-protocol`
+- `.agents/skills/docs-trim`
 - `.agents/skills/context7-mcp`
-- `.agents/skills/caveman*` when Caveman Codex installer is available
-- `.codex-plugins/caveman` when Caveman Codex installer is available
+- `.agents/skills/caveman*`
+- `.agents/skills/ponytail*`
+- `.codex-plugins/caveman`
 
-## Use
+## 用法
 
-Style:
+风格：
 
 ```text
 /ponytail ultra
 /caveman wenyan-ultra
 ```
 
-Bug fix:
+文档：
+
+```text
+Use docs-trim. 只改文档。单点维护。简洁优先。文档禁代码。用案例讲。
+```
+
+修 bug：
 
 ```text
 Use bugfix-protocol. 文档短，无代码，用案例讲 bug。文档 -> 红测 -> 最小修 -> 绿停。
 ```
 
-Docs:
+查外部库文档：
 
 ```text
 use context7 for Next.js middleware docs
 use context7 with /vercel/next.js for app router setup
 ```
 
-Semantic code:
+读代码结构：
 
 ```text
 Use Serena to inspect symbols/references before editing.
 ```
 
-## Verify
+## 验证
 
-Claude Code:
+Claude Code：
 
 ```text
 /plugins
 /mcp
 ```
 
-Codex:
+Codex：
 
 ```text
 /mcp
 ```
 
-Shell:
+命令行：
 
 ```bash
 claude plugin list
@@ -121,11 +132,11 @@ codex mcp get serena
 codex mcp get context7
 ```
 
-## Notes
+## 注意
 
-- Restart Claude Code, Codex, and VS Code after install.
-- Serena starts through `uvx`; first launch may be slow.
-- Serena dashboard stays enabled but no longer auto-opens browser tabs.
-- Context7 uses hosted HTTP MCP for Claude Code.
-- Context7 uses stdio MCP for Codex to avoid OAuth blocking in terminal install.
-- Script stores no API keys unless `CONTEXT7_API_KEY` is already exported.
+- 安装后重启 Claude Code、Codex、VS Code。
+- Serena 通过 `uvx` 启动，首次可能慢。
+- Serena dashboard 保留，但不自动弹浏览器。
+- Claude Code 的 Context7 用 HTTP MCP。
+- Codex 的 Context7 用 stdio MCP，避免安装时卡 OAuth。
+- 脚本不保存 key；除非你先导出 `CONTEXT7_API_KEY`。
