@@ -5,24 +5,30 @@
         3元
         60
           chaofox
-      硬度4
-    白轴 todo
+      非常硬
+        硬度3
+        仅次于翡翠深蓝
+    白轴 ok
       30颗
         30
           旗舰店
-    白轴v2 todo
-      30颗
-        45
-          官方旗舰店
+      硬度非常好, 脆
+      白轴v2
+        30颗
+          45
+            官方旗舰店
+        体感不如v1 xx
     云豹
       30颗
         91
         3元
-      据说特别清脆
-    白枭
+      还行, 并不惊艳
+      硬度并没有特别的感觉
+    白枭 ok
       30颗
         68
         2元
+      很不错
     真响
       30颗
         68.8
@@ -35,31 +41,48 @@
           旗舰店
       体感几乎等于青轴
       硬度3
-    知秋 todo
+    知秋 ok
       30颗
         67
+        36
       很脆
   重
-    navy深蓝 xx
+    navy深蓝
       30颗
         45
           旗舰店
         1.5
       硬度5
       修饰键不能用
-        因为会影响按键顺序
-          cmd c
-            会先上c
-        修饰键
-          ctrl
-          cmd
-          alt
-          shift
-    翡翠 todo
+        因为太硬了
+          硬到会影响按键顺序
+            cmd c
+              会先上c
+            修饰键
+              ctrl
+              cmd
+              alt
+              shift
+          可以用在重键上
+            大键
+              空格
+              回车
+              tab
+              backspace
+              cap lock
+            esc
+            六键区
+              翻页
+              删除
+              home/end
+    翡翠
       30颗
         50
           旗舰店
         1.6
+      硬度4
+      可以用在修饰键
+        并不会影响按键顺序
 ----- 昭 -----
 键帽
   条件:
@@ -75,48 +98,125 @@
       无刻
       键高
         mt3
+          待评价
         sa
+          sa和类sa差2mm
+          类sa
+          osa
+          asa
         mg
         kat
-        asa
         mda
+          还算舒适
+          不够极端
+        hoa
+          很不错
+          纯平排列
     别太贵, 一套600以内都可以接受
     最终
-      厂商
-        薄荷M外设
-          键高
-            不合适
-              柱状
-                cherry
-                oem
-            纯平
-              xda
-              moa
-              mog
-            sa
-              适合打字
-            msa
-            mda
-              有无刻印
-        娜娜外设
-          无刻印sa
-        极客数码
+      待定
+        弈嗨昆比
+          表明 类sa
+          并且有sa出售
+        键帽馆
+        品牌
+          keyboardman
+            奸商外设
+        domikey
+          莫比乌斯
+      hoa
+        等高
+          xvx的产品
+        深陷
+      sa系列
+        超矮sa11mm
+          喵喵客制化
+            可以定制无刻 11
+            不能定制dvorak
+            他家的sa与众不同, 非常矮
           xvx
-      品牌
-        xvx
-        大叶
-        元创
-        maxkey
-        薄荷糖
-        键喵
-        keyforge
-        浅笑
-      高度
-        sa
-        mda
-        hoa
-          等高
-          深陷
+            他都是很矮的
+            极客数码
+              xvx
+              并未标明他的sa不是正常高度sa
+            但是他的hoa高度其实还不错
+        osa12mm
+          z6ultra
+            keychron
+        类sa14mm
+          大叶
+            abs
+              keyforge也是大叶
+                keyforge键造所
+                  表明了: 类sa
+                  sa给的大叶
+                    实际也是类sa
+              他家其实都是 类sa
+          悲剧
+            没有无刻 xx
+          浅笑
+            pbt
+              他家都是 类sa
+                键喵
+                  类sa
+                  keymeow
+                尚青数码
+                  标明了: 类sa
+                  但是没有sa
+                元创
+                  心动外设
+                    走了顺丰 ok
+                  类sa
+                也是薄荷在卖
+                  薄荷糖
+                    薄荷M外设
+                      键高
+                        不合适
+                          柱状
+                            cherry
+                            oem
+                        纯平
+                          xda
+                          moa
+                          mog
+                        sa
+                          适合打字
+                        msa
+                        mda
+                          有无刻印
+                      并未标明类sa还是sa
+                    类sa
+        sa16mm
+          娜娜外设
+            无刻印sa 11
+          maxkey
+            hh中古卡牌店
+      matt3o设计的
+        mt3
+          闲鱼
+            基础套件
+          ebay
+            dvorak补充包 !!
+        mtnu
+        意大利设计师 Matteo Spinelli
+      mda
+        一般
+          薄荷
+          xvx
+          浅笑
+        有无刻 22
+          但是高度不一致
+      待询问品牌
+        gmk 11
+        SP 11
+          signature plastics
+        drop 11
+        domikey 22
+        zenithkey 22
+        maxkey 22
+        左乐嘉 33
+        设计师
+          oblotzky 11
 布局
   保持基础87键
   dvorak布局
@@ -142,5 +242,10 @@
       Q3
       Q6
       z6ultra108
+腕托
+  绿檀
+  铝
+  亚克力
+  石英
 ----- 父 -----
 2026.618.dog
