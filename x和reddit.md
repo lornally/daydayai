@@ -18,3 +18,17 @@ telegram?
 - **Telegram：可能有搬运频道，但我没有查到可确认的官方或长期稳定频道。** 这类频道经常改名、失效或冒充官方；可在 Telegram 内搜索 `Isis Fashion Awards`、`nude runway`，不要只搜 `ISIS`。
 
 结论：**X 最容易找到同类内容，Reddit 次之；Telegram 有搬运，但可靠性最低。**
+
+
+
+### 有个疑问
+telegram 聊天记录中上面很多预览都是磨砂画质, 这个怎么解除?
+
+macos的telegram, 下载的媒体在哪里? 你直接帮我找一下
+
+
+telegram为啥这样了? 之前他都会好好地摆在某个文件夹内的
+
+partial是没下载完全的吗?
+1. 你说是一个文件的2个链接, 那么文件本体在哪里?
+2. telegram里面现在也没有另存了. 好奇怪.
