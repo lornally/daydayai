@@ -1,0 +1,48 @@
+主题文件夹
+  摩托车
+    需求分析.dog 分析
+    改装.dog
+    品牌 / 销量 / 价格逻辑
+    ktm 豪爵 张雪 图库
+  键盘
+    轴体表格
+    键位含义
+    布局 / 备用
+    绿檀腕托保养
+  地图
+    地图.dog
+    claude 与 kimi 双份总结
+  识别
+    磁力链
+    trackerlist
+  枕头
+    6.11 乳胶枕
+----- 昭 -----
+日常笔记
+  r2603xx 系列
+  6.x ~ 9.x 日期流
+  医学杂记
+    拔牙 / 牙疼
+    毛囊炎
+    梅毒淋病
+  排障 bug
+    mac 变慢 / nvram
+    Finder / Spotlight
+    git 很慢 / 历史改写
+    vscode / codex
+  杂学
+    成语 / 地名
+    影视 / 书单 / 漫画
+    日式麻将
+工具与脚本
+  bugfix-protocol
+  bugfix-tests
+  docs-trim
+  scripts
+  cfg / nvram 配置
+  install-*.sh
+AI 相关 AI
+  AI_AGENT_STACK
+  claude 配置
+  codex / kimi / lingma
+  agent-brief-rules
