@@ -246,7 +246,7 @@ def note_for(label):
 
 s = open(HTML, encoding="utf-8").read()
 if "<style>" in s:
-    s = s.replace(" .line .grid{grid-template-columns:repeat(auto-fill,minmax(620px,1fr))} .line figure img{width:100%;height:auto} .line figcaption{font-size:13px} figure a{display:block}</style>", " figcaption em{display:block;margin-top:6px;font-style:normal;font-size:11px;color:#059669;line-height:1.45}"
+    s = s.replace(" .line .grid{display:block;columns:300px;column-gap:14px} .line figure{break-inside:avoid;width:100%;margin:0 0 14px;box-sizing:border-box} .line figure img{width:100%;height:auto;margin:0} .line figcaption{font-size:13px} figure a{display:block}</style>", " figcaption em{display:block;margin-top:6px;font-style:normal;font-size:11px;color:#059669;line-height:1.45}"
                              " figure{display:flex;flex-direction:column} figure img{margin:auto}</style>", 1)
 
 hits = 0
