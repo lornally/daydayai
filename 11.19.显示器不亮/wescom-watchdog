@@ -1,0 +1,90 @@
+#!/bin/zsh
+# wescom-watchdog — 显示器每次被唤醒后自动检查 wescom 状态
+#
+# 判断方法: 显示器正常时 DDC 能读到亮度 (>0); 卡死时 DDC 返回 0.
+# 只在"显示器刚从灭变亮"后检查 (用 pmset 日志做门控),
+# 正常休眠/关屏时不会动作.
+# 连续两次读不到 → 判定卡死 → 调用 fix-wescom 重新协商链路.
+#
+# 设计说明见同目录 README.md.
+
+set -u
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+FIX="$HOME/.local/bin/fix-wescom"
+LOG="/tmp/wescom-watchdog.log"
+INTERVAL=10
+ARCH=$(uname -m)
+
+if [[ "$ARCH" == "arm64" ]]; then
+  DDC="m1ddc"
+  command -v m1ddc >/dev/null 2>&1 || brew install m1ddc >>"$LOG" 2>&1
+else
+  DDC="ddcctl"
+  command -v ddcctl >/dev/null 2>&1 || brew install ddcctl >>"$LOG" 2>&1
+fi
+
+# 找到 wescom 的 DDC 序号:
+#   m1ddc: 按显示器名匹配 W+数字 (如 W2876ZZY), 匹配不到取最后一块屏
+#   ddcctl: 按 CoreGraphics 顺序, 副屏通常为 2
+resolve_idx() {
+  local idx
+  if [[ "$DDC" == "m1ddc" ]]; then
+    idx=$(m1ddc display list 2>/dev/null | awk '/^\[[0-9]+\] W[0-9]/{gsub(/[][]/,"",$1);print $1;exit}')
+    [[ -z "$idx" ]] && idx=$(m1ddc display list 2>/dev/null | tail -1 | awk '{gsub(/[][]/,"",$1);print $1}')
+  else
+    idx=2
+  fi
+  echo "${idx:-2}"
+}
+
+# 读亮度; 读不到输出空 (DDC 不可用)
+read_lum() {
+  local idx=$1
+  if [[ "$DDC" == "m1ddc" ]]; then
+    m1ddc display "$idx" get luminance 2>/dev/null | tr -dc '0-9'
+  else
+    ddcctl -d "$idx" -b 2>/dev/null | grep -i 'brightness' | grep -oE '[0-9]+' | tail -1
+  fi
+}
+
+prev=off
+armed=1
+deadline=$(( $(date +%s) + 45 ))
+zeros=0
+
+while true; do
+  last=$(pmset -g log 2>/dev/null | grep -E 'Display is turned (on|off)' | tail -1)
+  case "$last" in
+    *"turned on"*) state=on ;;
+    *)             state=off ;;
+  esac
+
+  now=$(date +%s)
+  if [[ "$state" == "on" && "$prev" != "on" ]]; then
+    armed=1; deadline=$((now+60)); zeros=0
+  fi
+  prev=$state
+
+  if [[ "$state" == "on" && "$armed" -eq 1 ]]; then
+    if (( now > deadline )); then
+      armed=0
+    else
+      lum=$(read_lum "$(resolve_idx)")
+      if [[ -z "$lum" ]]; then
+        :   # DDC 不可用: 不自动动手, 留给手动 fix-wescom
+      elif (( lum == 0 )); then
+        zeros=$((zeros+1))
+      else
+        zeros=0
+      fi
+      if (( zeros >= 2 )); then
+        armed=0; zeros=0
+        echo "$(date '+%F %T') wescom stuck, re-training link" >>"$LOG"
+        "$FIX" >>"$LOG" 2>&1
+      fi
+    fi
+  fi
+
+  sleep $INTERVAL
+done

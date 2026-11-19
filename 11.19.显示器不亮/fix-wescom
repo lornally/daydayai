@@ -1,0 +1,91 @@
+#!/bin/zsh
+# fix-wescom — 唤醒卡在待机状态的显示器 (wescom 等廉价屏的 DPMS 唤醒 bug)
+#
+# 原理: 把所有外接屏的刷新率切到另一个支持的值 (约3秒) 再切回来,
+#       迫使 DisplayPort 链路重新协商/训练 —— 效果等同重启 Mac,
+#       但只需要几秒, 且不影响正在运行的程序.
+#
+# 用法: fix-wescom        (修复)
+#       fix-wescom -n     (只打印将要执行的配置, 不实际修改)
+#
+# 可跨机器使用: 屏幕 ID 和模式每次运行自动探测, 无硬编码.
+# 详细背景见同目录 README.md.
+
+set -u
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+DRY=0
+[[ "${1:-}" == "-n" ]] && DRY=1
+
+if ! command -v displayplacer >/dev/null 2>&1; then
+  echo "Installing displayplacer ..."
+  brew install displayplacer || { echo "brew install displayplacer failed"; exit 1; }
+fi
+
+TABLE=$(displayplacer list 2>/dev/null | awk '
+/^Persistent screen id: / { id=$4; res="";hz="";cd="";sc="off";org="";rot="0";en="false"; sec=0; next }
+/^Resolution: /          { res=$2; next }
+/^Hertz: /               { hz=$2; next }
+/^Color Depth: /         { cd=$3; next }
+/^Scaling: /             { sc=($2=="on")?"on":"off"; next }
+/^Origin: /              { s=$0; sub(/^Origin: */,"",s); sub(/ *- main display$/,"",s); org=s; next }
+/^Rotation: /            { rot=$2; next }
+/^Enabled: /             { en=$2; next }
+/^Resolutions for rotation/ {
+  sec=1
+  if (en=="true") print "D|"id"|"res"|"hz"|"cd"|"sc"|"org"|"rot
+  next
+}
+sec==1 && /mode [0-9]+:/ {
+  if (en!="true") next
+  r=""; h=""
+  if (match($0,/res:[0-9]+x[0-9]+/)) r=substr($0,RSTART+4,RLENGTH-4)
+  if (match($0,/hz:[0-9.]+/))        h=substr($0,RSTART+3,RLENGTH-3)
+  s2 = ($0 ~ /scaling:on/) ? "on" : "off"
+  if (r==res && s2==sc && h+0 != hz+0) print "A|"id"|"h
+  next
+}')
+
+[[ -z "$TABLE" ]] && { echo "No displays found"; exit 1; }
+
+typeset -A R HZ CD SC ORG ROT ALT
+order=()
+while IFS='|' read -r k a b c d e f g; do
+  [[ -z "$k" ]] && continue
+  if [[ "$k" == "D" ]]; then
+    order+=("$a")
+    R[$a]=$b; HZ[$a]=$c; CD[$a]=$d; SC[$a]=$e; ORG[$a]=$f; ROT[$a]=$g
+  elif [[ "$k" == "A" ]]; then
+    if [[ -z "${ALT[$a]:-}" || "$b" == "30" || "$b" == "50" ]]; then
+      ALT[$a]=$b
+    fi
+  fi
+done <<< "$TABLE"
+
+build() {
+  local id=$1 hz=$2
+  printf 'id:%s res:%s hz:%s color_depth:%s scaling:%s origin:%s degree:%s' \
+    "$id" "${R[$id]}" "$hz" "${CD[$id]}" "${SC[$id]}" "${ORG[$id]}" "${ROT[$id]}"
+}
+
+cur=() alt=()
+for id in "${order[@]}"; do
+  cur+=("$(build "$id" "${HZ[$id]}")")
+  if [[ -n "${ALT[$id]:-}" ]]; then
+    alt+=("$(build "$id" "${ALT[$id]}")")
+  else
+    alt+=("$(build "$id" "${HZ[$id]}")")
+  fi
+done
+
+if (( DRY )); then
+  print -r -- "ALT:"
+  print -rl -- "${alt[@]}"
+  print -r -- "CUR:"
+  print -rl -- "${cur[@]}"
+  exit 0
+fi
+
+displayplacer "${alt[@]}" || exit 1
+perl -e 'select(undef,undef,undef,3)'
+displayplacer "${cur[@]}"
