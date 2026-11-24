@@ -1,28 +1,137 @@
 #!/bin/zsh
-# fix-wescom — 唤醒卡在待机状态的显示器 (wescom 等廉价屏的 DPMS 唤醒 bug)
+# fix-wescom — 唤醒卡在待机状态的 WSM/wescom 显示器
 #
-# 原理: 把所有外接屏的刷新率切到另一个支持的值 (约3秒) 再切回来,
-#       迫使 DisplayPort 链路重新协商/训练 —— 效果等同重启 Mac,
-#       但只需要几秒, 且不影响正在运行的程序.
+# 现象: 显示器从 DPMS 待机唤醒后固件卡死 —— 面板黑, OSD 无响应,
+#       但 macOS 仍报告 Online (老机器) 或把屏从链路/桌面移除 (新机器).
 #
-# 用法: fix-wescom        (修复)
-#       fix-wescom -n     (只打印将要执行的配置, 不实际修改)
+# 修复顺序 (从保守到激进):
+#   0. 屏已被 macOS 移出列表 -> 私有 SkyLight 接口软件重新接入 (wescom-dpfix on).
+#   1. DDC 电源唤醒 (m1ddc set standby 1) —— 不闪屏, 最安全.
+#   2. 软件拔插 (wescom-dpfix replug: off -> 2 秒 -> on) —— 不拔线, 重建显示管线.
+#   3. 同分辨率换刷新率重协商 —— 只调频率, 不改分辨率 (老 wescom 的已验证方案).
+#      前提: EDID 在相同分辨率/缩放下提供另一个刷新率 (如 30/50Hz).
+#   4. HiDPI <-> 1x 切换 —— 仅 -s 时启用, 会改 backing 分辨率, 有掉链路风险.
+#   5. 都失败 -> 提示物理拔插 USB-C 线.
 #
-# 可跨机器使用: 屏幕 ID 和模式每次运行自动探测, 无硬编码.
-# 详细背景见同目录 README.md.
+# 用法: fix-wescom        (自动检测并修复)
+#       fix-wescom -n     (只检查并打印将执行的动作, 不修改)
+#       fix-wescom -s     (允许 HiDPI <-> 1x 切换实验)
+#       fix-wescom --save     (保存当前三屏配置, 供 --restore 用)
+#       fix-wescom --restore  (恢复上次保存的模式/布局)
+#
+# 跨机器通用: 用 m1ddc 的 Manufacturer=WSM 识别 WSM 屏, 不硬编码型号/屏幕 ID.
+# 详细背景与各机器差异见同目录 README.md.
 
 set -u
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 DRY=0
-[[ "${1:-}" == "-n" ]] && DRY=1
+ALLOW_SCALING=0
+RESTORE=0
+SAVE=0
+for arg in "$@"; do
+  case "$arg" in
+    -n) DRY=1 ;;
+    -s) ALLOW_SCALING=1 ;;
+    --restore) RESTORE=1 ;;
+    --save) SAVE=1 ;;
+  esac
+done
+ARCH=$(uname -m)
+STATE="$HOME/.local/state/wescom-last-config"
 
-if ! command -v displayplacer >/dev/null 2>&1; then
-  echo "Installing displayplacer ..."
-  brew install displayplacer || { echo "brew install displayplacer failed"; exit 1; }
+if [[ "$ARCH" == "arm64" ]]; then
+  DDC=m1ddc
+else
+  DDC=ddcctl
 fi
 
-TABLE=$(displayplacer list 2>/dev/null | awk '
+command -v displayplacer >/dev/null 2>&1 || { echo "缺少 displayplacer: brew install displayplacer"; exit 1; }
+
+# 软件拔插工具 (install.sh 编译安装)
+DPFIX="$HOME/.local/bin/wescom-dpfix"
+if [[ ! -x "$DPFIX" ]]; then
+  DPFIX="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/wescom-dpfix"
+fi
+
+# 把保存的完整三屏配置恢复回来
+apply_saved() {
+  [[ -f "$STATE" ]] || return 1
+  typeset -a SAVED
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && SAVED+=("$line")
+  done < "$STATE"
+  (( ${#SAVED[@]} )) || return 1
+  displayplacer "${SAVED[@]}"
+}
+
+if (( RESTORE )); then
+  apply_saved || { echo "没有可恢复的配置: $STATE"; exit 1; }
+  exit $?
+fi
+
+command -v "$DDC" >/dev/null 2>&1 || { echo "缺少 $DDC: brew install $DDC"; exit 1; }
+
+# 找 WSM 屏的 DDC 序号 (m1ddc 按厂商匹配, 不硬编码型号)
+resolve_idx() {
+  local idx=""
+  if [[ "$DDC" == "m1ddc" ]]; then
+    idx=$(m1ddc display list detailed 2>/dev/null | awk '
+      /^\[[0-9]+\] / { match($0,/^\[[0-9]+\]/); cur=substr($0,RSTART+1,RLENGTH-2); next }
+      /- Manufacturer:[ \t]*WSM/ { print cur; exit }')
+    [[ -z "$idx" ]] && idx=$(m1ddc display list 2>/dev/null | awk '/^\[[0-9]+\] W[0-9]/{gsub(/[][]/,"",$1);print $1;exit}')
+    # 不再用“最后一块屏”兜底: 多屏机器上会把别的屏当成 WSM, 导致误判正常.
+  else
+    idx=2
+  fi
+  print -r -- "${idx:-}"
+}
+
+# 找 WSM 屏的 CoreGraphics UUID (给 displayplacer 用)
+resolve_uuid() {
+  [[ "$DDC" == "m1ddc" ]] || { print -r -- ""; return; }
+  command -v m1ddc >/dev/null 2>&1 || { print -r -- ""; return; }
+  m1ddc display list detailed 2>/dev/null | awk '
+    /^\[[0-9]+\] / { line=$0; next }
+    /- Manufacturer:[ \t]*WSM/ {
+      if (match(line, /\([0-9A-Fa-f-]+\)/)) print substr(line,RSTART+1,RLENGTH-2)
+      exit
+    }'
+}
+
+# DDC 命令加 5 秒超时: 固件卡死时 DDC 调用可能永久挂起
+ddc_run() { perl -e 'alarm 5; exec @ARGV' -- "$@" 2>/dev/null; }
+
+# 读亮度; 空输出 = DDC 不可用/卡死
+read_lum() {
+  local idx=$1
+  if [[ "$DDC" == "m1ddc" ]]; then
+    ddc_run m1ddc display "$idx" get luminance | tr -dc '0-9'
+  else
+    ddc_run ddcctl -d "$idx" -b | grep -i 'brightness' | grep -oE '[0-9]+' | tail -1
+  fi
+}
+
+build() {
+  local id=$1 hz=$2 sc=$3
+  printf 'id:%s res:%s hz:%s color_depth:%s scaling:%s origin:%s degree:%s' \
+    "$id" "${R[$id]}" "$hz" "${CD[$id]}" "$sc" "${ORG[$id]}" "${ROT[$id]}"
+}
+
+typeset -A R HZ CD SC ORG ROT ALTHZ ALTSC ALTKIND
+order=()
+cur=()
+alt=()
+targets=()
+
+# 解析 displayplacer list, 生成当前配置(cur)和候选重协商配置(alt)
+load_displays() {
+  R=(); HZ=(); CD=(); SC=(); ORG=(); ROT=()
+  ALTHZ=(); ALTSC=(); ALTKIND=()
+  order=(); cur=(); alt=(); targets=()
+
+  local TABLE
+  TABLE=$(displayplacer list 2>/dev/null | awk '
 /^Persistent screen id: / { id=$4; res="";hz="";cd="";sc="off";org="";rot="0";en="false"; sec=0; next }
 /^Resolution: /          { res=$2; next }
 /^Hertz: /               { hz=$2; next }
@@ -42,50 +151,179 @@ sec==1 && /mode [0-9]+:/ {
   if (match($0,/res:[0-9]+x[0-9]+/)) r=substr($0,RSTART+4,RLENGTH-4)
   if (match($0,/hz:[0-9.]+/))        h=substr($0,RSTART+3,RLENGTH-3)
   s2 = ($0 ~ /scaling:on/) ? "on" : "off"
-  if (r==res && s2==sc && h+0 != hz+0) print "A|"id"|"h
-  next
+  if (r!=res) next
+  if (s2==sc && h+0 != hz+0) print "A|"id"|"h"|"s2
+  else if (s2!=sc && h+0 == hz+0) print "A|"id"|"h"|"s2
 }')
+  [[ -z "$TABLE" ]] && return 1
 
-[[ -z "$TABLE" ]] && { echo "No displays found"; exit 1; }
-
-typeset -A R HZ CD SC ORG ROT ALT
-order=()
-while IFS='|' read -r k a b c d e f g; do
-  [[ -z "$k" ]] && continue
-  if [[ "$k" == "D" ]]; then
-    order+=("$a")
-    R[$a]=$b; HZ[$a]=$c; CD[$a]=$d; SC[$a]=$e; ORG[$a]=$f; ROT[$a]=$g
-  elif [[ "$k" == "A" ]]; then
-    if [[ -z "${ALT[$a]:-}" || "$b" == "30" || "$b" == "50" ]]; then
-      ALT[$a]=$b
+  local k a b c d e f g h
+  while IFS='|' read -r k a b c d e f g h; do
+    [[ -z "$k" ]] && continue
+    if [[ "$k" == "D" ]]; then
+      order+=("$a")
+      R[$a]=$b; HZ[$a]=$c; CD[$a]=$d; SC[$a]=$e; ORG[$a]=$f; ROT[$a]=$g
+    elif [[ "$k" == "A" ]]; then
+      # b=候选hz, c=候选scaling.
+      # 只用"同分辨率+同缩放、不同刷新率"的候选 (只调频率).
+      # 同刷新率不同 scaling 的候选只有在 -s 时才考虑, 且不覆盖频率候选.
+      if [[ "$b" != "${HZ[$a]:-}" && "$c" == "${SC[$a]:-}" ]]; then
+        if [[ "${ALTKIND[$a]:-}" != "hz" || "$b" == "30" || "$b" == "50" ]]; then
+          ALTHZ[$a]=$b; ALTSC[$a]=$c; ALTKIND[$a]=hz
+        fi
+      elif (( ALLOW_SCALING )) && [[ "$b" == "${HZ[$a]:-}" && "$c" != "${SC[$a]:-}" && -z "${ALTKIND[$a]:-}" ]]; then
+        ALTHZ[$a]=$b; ALTSC[$a]=$c; ALTKIND[$a]=sc
+      fi
     fi
-  fi
-done <<< "$TABLE"
+  done <<< "$TABLE"
 
-build() {
-  local id=$1 hz=$2
-  printf 'id:%s res:%s hz:%s color_depth:%s scaling:%s origin:%s degree:%s' \
-    "$id" "${R[$id]}" "$hz" "${CD[$id]}" "${SC[$id]}" "${ORG[$id]}" "${ROT[$id]}"
+  local id
+  for id in "${order[@]}"; do
+    cur+=("$(build "$id" "${HZ[$id]}" "${SC[$id]}")")
+  done
+
+  local WSM_UUID
+  WSM_UUID=$(resolve_uuid)
+  if [[ -n "$WSM_UUID" && -n "${ALTKIND[$WSM_UUID]:-}" ]]; then
+    targets=("$WSM_UUID")
+  else
+    for id in "${order[@]}"; do
+      [[ -n "${ALTKIND[$id]:-}" ]] && targets+=("$id")
+    done
+  fi
+
+  for id in "${order[@]}"; do
+    if [[ " ${targets[*]:-} " == *" $id "* && -n "${ALTHZ[$id]:-}" ]]; then
+      alt+=("$(build "$id" "${ALTHZ[$id]}" "${ALTSC[$id]}")")
+    else
+      alt+=("$(build "$id" "${HZ[$id]}" "${SC[$id]}")")
+    fi
+  done
+  return 0
 }
 
-cur=() alt=()
-for id in "${order[@]}"; do
-  cur+=("$(build "$id" "${HZ[$id]}")")
-  if [[ -n "${ALT[$id]:-}" ]]; then
-    alt+=("$(build "$id" "${ALT[$id]}")")
-  else
-    alt+=("$(build "$id" "${HZ[$id]}")")
-  fi
-done
+load_displays || { echo "displayplacer 未列出任何显示器。"; exit 1; }
 
-if (( DRY )); then
-  print -r -- "ALT:"
-  print -rl -- "${alt[@]}"
-  print -r -- "CUR:"
-  print -rl -- "${cur[@]}"
+# --save: 保存当前在线显示配置 (看护服务在健康时调用, 保证 --restore 拿到最新布局)
+if (( SAVE )); then
+  (( ${#cur[@]} )) || { echo "没有可保存的在线显示器配置。"; exit 1; }
+  mkdir -p "${STATE:h}"
+  print -rl -- "${cur[@]}" > "$STATE"
+  echo "已保存当前三屏配置到 $STATE"
   exit 0
 fi
 
-displayplacer "${alt[@]}" || exit 1
-perl -e 'select(undef,undef,undef,3)'
-displayplacer "${cur[@]}"
+# --- 0) 屏可能已被 macOS 移出列表: 先尝试软件重新接入 ---
+IDX=$(resolve_idx)
+if [[ -z "$IDX" ]]; then
+  echo "WSM 未出现在显示列表里（可能已被 macOS 移出桌面）。"
+  if (( ! DRY )) && [[ -x "$DPFIX" ]]; then
+    line=$("$DPFIX" find 2>/dev/null | awk '$2=="online=0"{print; exit}')
+    [[ -z "$line" ]] && line=$("$DPFIX" find 2>/dev/null | head -1)
+    if [[ -n "$line" ]]; then
+      cgid=${line%% *}
+      echo "==> 软件重新接入 (CG id $cgid)"
+      "$DPFIX" on "$cgid" >/dev/null 2>&1
+      sleep 3
+      apply_saved >/dev/null 2>&1
+      load_displays || true
+      sleep 1
+      IDX=$(resolve_idx)
+      if [[ -n "$IDX" ]]; then
+        LUM=$(read_lum "$IDX")
+        if [[ -n "$LUM" && "$LUM" -gt 0 ]]; then
+          echo "已通过软件重新接入恢复（亮度 $LUM）。"
+          exit 0
+        fi
+      fi
+    fi
+  fi
+  if [[ -z "$IDX" ]]; then
+    echo
+    echo "软件层也无法接回。请拔掉这块屏的 USB-C 视频线，等 3 秒再插回 Mac 端；"
+    echo "同一口不行就换一个 USB-C 口。"
+    exit 1
+  fi
+fi
+
+# --- 健康检查 ---
+LUM=$(read_lum "$IDX")
+if [[ -n "$LUM" && "$LUM" -gt 0 ]]; then
+  echo "WSM 显示器正常（DDC 亮度 $LUM），无需修复。"
+  exit 0
+fi
+
+echo "检测到 WSM 显示器异常（DDC 读数: ${LUM:-无响应}）。"
+if (( DRY )); then
+  echo "[dry-run] 将依次尝试: 软件重新接入 -> DDC 电源唤醒 -> 软件拔插 -> 同分辨率换刷新率 -> 物理拔插提示"
+  (( ALLOW_SCALING )) && echo "[dry-run] -s: 允许 HiDPI <-> 1x 切换实验"
+  exit 0
+fi
+
+# 动手前保存当前配置, 成功后恢复布局/HiDPI
+if (( ${#cur[@]} )); then
+  mkdir -p "${STATE:h}"
+  print -rl -- "${cur[@]}" > "$STATE"
+fi
+
+# --- 1) DDC 电源唤醒 (老机器卡死时 DDC 仍可用, 直接开屏) ---
+if [[ "$DDC" == "m1ddc" ]]; then
+  echo "==> 尝试 DDC 电源唤醒 (set standby 1)"
+  ddc_run m1ddc display "$IDX" set standby 1 >/dev/null || true
+  sleep 5
+  IDX=$(resolve_idx)
+  [[ -n "$IDX" ]] && LUM=$(read_lum "$IDX")
+  if [[ -n "${LUM:-}" && "$LUM" -gt 0 ]]; then
+    echo "已通过 DDC 唤醒（亮度 $LUM）。"
+    exit 0
+  fi
+fi
+
+# --- 2) 软件拔插 (off -> 2s -> on), 重建显示管线 ---
+if [[ -x "$DPFIX" ]]; then
+  line=$("$DPFIX" find 2>/dev/null | awk '$2=="online=1"{print; exit}')
+  if [[ -n "$line" ]]; then
+    cgid=${line%% *}
+    echo "==> 软件拔插 (CG id $cgid)"
+    "$DPFIX" replug "$cgid" >/dev/null 2>&1
+    sleep 2
+    apply_saved >/dev/null 2>&1
+    load_displays || true
+    sleep 2
+    IDX=$(resolve_idx)
+    [[ -n "$IDX" ]] && LUM=$(read_lum "$IDX")
+    if [[ -n "${LUM:-}" && "$LUM" -gt 0 ]]; then
+      echo "已通过软件拔插唤醒（亮度 $LUM）。"
+      exit 0
+    fi
+  fi
+fi
+
+# --- 3) 同分辨率模式重协商 (只调频率; -s 时才允许 HiDPI <-> 1x) ---
+if (( ${#targets[@]} == 0 )); then
+  echo "没有可用的同分辨率备选模式，跳过重协商。"
+else
+  echo "==> 同分辨率模式重协商 (${targets[*]})"
+  mkdir -p "${STATE:h}"
+  print -rl -- "${cur[@]}" > "$STATE"
+  if displayplacer "${alt[@]}"; then
+    perl -e 'select(undef,undef,undef,3)'
+    displayplacer "${cur[@]}" || echo "切回原模式失败，请执行 displayplacer list 检查。"
+  else
+    echo "切换备选模式失败。"
+  fi
+  sleep 2
+  IDX=$(resolve_idx)
+  [[ -n "$IDX" ]] && LUM=$(read_lum "$IDX")
+  if [[ -n "${LUM:-}" && "$LUM" -gt 0 ]]; then
+    echo "重协商后已唤醒（亮度 $LUM）。"
+    exit 0
+  fi
+fi
+
+echo
+echo "自动修复失败。请按顺序操作："
+echo "  1) 拔掉这块屏的 USB-C 视频线，等 3 秒插回 Mac 端（只关显示器电源不够）。"
+echo "  2) 同一口无效就换一个 USB-C 口。"
+echo "  3) 恢复后进显示器 OSD：关闭 Deep Sleep/ECO，DP 版本设为 1.2，DDC/CI 打开，输入源固定。"
+exit 1

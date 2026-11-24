@@ -35,6 +35,15 @@ mkdir -p "$BIN"
 install -m 755 "$HERE/fix-wescom"      "$BIN/fix-wescom"
 install -m 755 "$HERE/wescom-watchdog" "$BIN/wescom-watchdog"
 
+echo "==> 编译软件重连工具 wescom-dpfix (私有 SkyLight 接口)"
+if command -v clang >/dev/null 2>&1 && \
+   clang -O2 -Wall -framework CoreGraphics "$HERE/wescom-dpfix.c" -o "$BIN/wescom-dpfix" 2>/tmp/wescom-build.log; then
+  chmod 755 "$BIN/wescom-dpfix"
+else
+  echo "WARN: wescom-dpfix 编译失败（需要 Xcode Command Line Tools）。"
+  echo "      仍会安装 DDC/刷新率/物理拔插方案；编译日志: /tmp/wescom-build.log"
+fi
+
 echo "==> 安装自动看护服务 ($LABEL)"
 mkdir -p "$AGENTS"
 cat > "$PLIST" <<'PLIST_EOF'

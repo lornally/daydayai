@@ -1,12 +1,14 @@
 #!/bin/zsh
-# wescom-watchdog — 显示器每次被唤醒后自动检查 wescom 状态
+# wescom-watchdog — WSM/wescom 显示器每次被唤醒后自动检查并尝试恢复
 #
-# 判断方法: 显示器正常时 DDC 能读到亮度 (>0); 卡死时 DDC 返回 0.
-# 只在"显示器刚从灭变亮"后检查 (用 pmset 日志做门控),
-# 正常休眠/关屏时不会动作.
-# 连续两次读不到 → 判定卡死 → 调用 fix-wescom 重新协商链路.
+# 判断方法: 正常时 DDC 能读到亮度 (>0); 卡死时读 0 或通信失败.
+# 只在"显示器刚从灭变亮"后的窗口内检查 (pmset 日志门控),
+# 正常休眠/关屏期间不会动作.
+# 连续 3 次异常 → 调用 fix-wescom -s:
+#   软件重新接入/软件拔插 -> DDC 电源唤醒 -> 同分辨率换刷新率 -> HiDPI<->1x
+# 仍失败 → 桌面通知, 提示拔插 USB-C 线; 屏被踢掉时, 插回后自动恢复原布局.
 #
-# 设计说明见同目录 README.md.
+# 设计说明与各机器差异见同目录 README.md.
 
 set -u
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -24,34 +26,50 @@ else
   command -v ddcctl >/dev/null 2>&1 || brew install ddcctl >>"$LOG" 2>&1
 fi
 
-# 找到 wescom 的 DDC 序号:
-#   m1ddc: 按显示器名匹配 W+数字 (如 W2876ZZY), 匹配不到取最后一块屏
-#   ddcctl: 按 CoreGraphics 顺序, 副屏通常为 2
+log() { echo "$(date '+%F %T') $*" >>"$LOG"; }
+
+# DDC 命令加 5 秒超时: 固件卡死时 DDC 调用可能永久挂起
+ddc_run() { perl -e 'alarm 5; exec @ARGV' -- "$@" 2>/dev/null; }
+
+# 找 WSM 屏的 DDC 序号 (m1ddc 按厂商匹配, 不硬编码型号)
 resolve_idx() {
-  local idx
+  local idx=""
   if [[ "$DDC" == "m1ddc" ]]; then
-    idx=$(m1ddc display list 2>/dev/null | awk '/^\[[0-9]+\] W[0-9]/{gsub(/[][]/,"",$1);print $1;exit}')
-    [[ -z "$idx" ]] && idx=$(m1ddc display list 2>/dev/null | tail -1 | awk '{gsub(/[][]/,"",$1);print $1}')
+    idx=$(m1ddc display list detailed 2>/dev/null | awk '
+      /^\[[0-9]+\] / { match($0,/^\[[0-9]+\]/); cur=substr($0,RSTART+1,RLENGTH-2); next }
+      /- Manufacturer:[ \t]*WSM/ { print cur; exit }')
+    [[ -z "$idx" ]] && idx=$(m1ddc display list 2>/dev/null | awk '/^\[[0-9]+\] W[0-9]/{gsub(/[][]/,"",$1);print $1;exit}')
+    # 不再用“最后一块屏”兜底: 多屏机器上会把别的屏当成 WSM, 导致误判正常.
   else
     idx=2
   fi
-  echo "${idx:-2}"
+  print -r -- "${idx:-}"
 }
 
-# 读亮度; 读不到输出空 (DDC 不可用)
+# 读亮度; 空输出 = DDC 不可用/显示器缺失/卡死
 read_lum() {
   local idx=$1
   if [[ "$DDC" == "m1ddc" ]]; then
-    m1ddc display "$idx" get luminance 2>/dev/null | tr -dc '0-9'
+    ddc_run m1ddc display "$idx" get luminance | tr -dc '0-9'
   else
-    ddcctl -d "$idx" -b 2>/dev/null | grep -i 'brightness' | grep -oE '[0-9]+' | tail -1
+    ddc_run ddcctl -d "$idx" -b | grep -i 'brightness' | grep -oE '[0-9]+' | tail -1
   fi
+}
+
+notify() {
+  local msg=$1
+  osascript -e "display notification \"$msg\" with title \"WSM 显示器\"" >/dev/null 2>&1 || true
+  log "notify: $msg"
 }
 
 prev=off
 armed=1
-deadline=$(( $(date +%s) + 45 ))
-zeros=0
+check_start=$(( $(date +%s) + 15 ))   # 开机/登录后先等 DDC 就绪
+deadline=$(( $(date +%s) + 105 ))
+bad=0
+saved=0
+pending_restore=0
+restore_deadline=0
 
 while true; do
   last=$(pmset -g log 2>/dev/null | grep -E 'Display is turned (on|off)' | tail -1)
@@ -61,27 +79,84 @@ while true; do
   esac
 
   now=$(date +%s)
+
+  # 上次重协商把屏踢掉后: 等它重新出现, 自动恢复原 HiDPI/布局
+  if (( pending_restore )); then
+    if (( now < restore_deadline )); then
+      idx=$(resolve_idx)
+      if [[ -n "$idx" ]]; then
+        log "display reappeared, restoring layout"
+        "$FIX" --restore >>"$LOG" 2>&1
+        sleep 2
+        lum=$(read_lum "$idx")
+        pending_restore=0
+        if [[ -n "$lum" && "$lum" -gt 0 ]]; then
+          log "layout restored, display ok (lum=$lum)"
+          notify "显示器已重新接入，原 HiDPI/布局已恢复。"
+        else
+          log "layout restored but display still black (lum=${lum:-none})"
+          notify "显示器已重新接入、布局已恢复，但屏仍黑。请再拔插一次 USB-C 线。"
+        fi
+      fi
+    else
+      pending_restore=0
+      log "restore window expired"
+    fi
+  fi
+
   if [[ "$state" == "on" && "$prev" != "on" ]]; then
-    armed=1; deadline=$((now+60)); zeros=0
+    armed=1; bad=0; saved=0
+    check_start=$((now+15))
+    deadline=$((now+105))
+    log "display on -> checking in 15s"
   fi
   prev=$state
 
   if [[ "$state" == "on" && "$armed" -eq 1 ]]; then
     if (( now > deadline )); then
       armed=0
-    else
-      lum=$(read_lum "$(resolve_idx)")
-      if [[ -z "$lum" ]]; then
-        :   # DDC 不可用: 不自动动手, 留给手动 fix-wescom
-      elif (( lum == 0 )); then
-        zeros=$((zeros+1))
+      log "check window closed"
+    elif (( now >= check_start )); then
+      idx=$(resolve_idx)
+      if [[ -z "$idx" ]]; then
+        lum=""
       else
-        zeros=0
+        lum=$(read_lum "$idx")
       fi
-      if (( zeros >= 2 )); then
-        armed=0; zeros=0
-        echo "$(date '+%F %T') wescom stuck, re-training link" >>"$LOG"
-        "$FIX" >>"$LOG" 2>&1
+
+      if [[ -z "$lum" || "$lum" -eq 0 ]]; then
+        bad=$((bad+1))
+        log "bad reading ${bad}/3 (idx=${idx:-none} lum=${lum:-none})"
+      else
+        bad=0
+        # 健康时保存一份最新三屏配置, 供软件重连后的 --restore 用
+        if (( saved == 0 )) && [[ -x "$FIX" ]]; then
+          "$FIX" --save >>"$LOG" 2>&1
+          saved=1
+        fi
+      fi
+
+      if (( bad >= 3 )); then
+        armed=0; bad=0
+        log "WSM stuck, running fix-wescom -s"
+        "$FIX" -s >>"$LOG" 2>&1
+        sleep 10
+        idx=$(resolve_idx)
+        if [[ -z "$idx" ]]; then
+          lum=""
+        else
+          lum=$(read_lum "$idx")
+        fi
+        if [[ -z "$lum" || "$lum" -eq 0 ]]; then
+          log "fix failed (idx=${idx:-none} lum=${lum:-none})"
+          if [[ -f "$HOME/.local/state/wescom-last-config" ]]; then
+            pending_restore=1
+            restore_deadline=$(( $(date +%s) + 1800 ))
+          fi
+          notify "显示器卡死，自动恢复失败。请拔插这块屏的 USB-C 视频线（Mac 端）；插回后会自动恢复原 HiDPI/布局。"
+        else
+          log "fix ok (lum=$lum)"
+        fi
       fi
     fi
   fi
