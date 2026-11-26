@@ -4,14 +4,16 @@
 # 现象: 显示器从 DPMS 待机唤醒后固件卡死 —— 面板黑, OSD 无响应,
 #       但 macOS 仍报告 Online (老机器) 或把屏从链路/桌面移除 (新机器).
 #
-# 修复顺序 (从保守到激进):
+# 修复顺序 (按各机器实测有效 + 恢复速度排序):
 #   0. 屏已被 macOS 移出列表 -> 私有 SkyLight 接口软件重新接入 (wescom-dpfix on).
-#   1. DDC 电源唤醒 (m1ddc set standby 1) —— 不闪屏, 最安全.
-#   2. 软件拔插 (wescom-dpfix replug: off -> 2 秒 -> on) —— 不拔线, 重建显示管线.
-#   3. 同分辨率换刷新率重协商 —— 只调频率, 不改分辨率 (老 wescom 的已验证方案).
-#      前提: EDID 在相同分辨率/缩放下提供另一个刷新率 (如 30/50Hz).
-#   4. HiDPI <-> 1x 切换 —— 仅 -s 时启用, 会改 backing 分辨率, 有掉链路风险.
-#   5. 都失败 -> 提示物理拔插 USB-C 线.
+#   1. 同分辨率换刷新率重协商 —— 只调频率, 不改分辨率, 约 6~10 秒.
+#      这是 11.19 老机器反复验证有效的方案, 所以放最前; EDID 里没有备用
+#      刷新率的机器自动跳过 (另一台 os27 机器就属于这种).
+#   2. DDC 电源唤醒 (m1ddc set standby 1) —— 不闪屏; DDC 已完全失效时跳过.
+#   3. 软件拔插 (wescom-dpfix replug: off -> 2 秒 -> on) —— 不拔线, 重建显示管线.
+#   4. HiDPI <-> 1x 切换 —— 仅 -s 且第 1 步不可用时启用, 会改 backing 分辨率.
+#   5. 都失败 -> 提示拔显示器电源线等 15 秒再插回 (按键/快速插拔复位不了).
+# 另外会顺手把 CG 里 online=0 的其它屏软件接回 (接不回的提示用户拔电源 15 秒).
 #
 # 用法: fix-wescom        (自动检测并修复)
 #       fix-wescom -n     (只检查并打印将执行的动作, 不修改)
@@ -54,7 +56,7 @@ if [[ ! -x "$DPFIX" ]]; then
   DPFIX="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/wescom-dpfix"
 fi
 
-# 把保存的完整三屏配置恢复回来
+# 把保存的完整配置恢复回来
 apply_saved() {
   [[ -f "$STATE" ]] || return 1
   typeset -a SAVED
@@ -62,11 +64,19 @@ apply_saved() {
     [[ -n "$line" ]] && SAVED+=("$line")
   done < "$STATE"
   (( ${#SAVED[@]} )) || return 1
+  # 保存的配置比当前在线屏少 = 保存时缺屏; 盲目恢复会把多出来的屏踢掉
+  cur_n=$(displayplacer list 2>/dev/null | grep -c '^Persistent screen id:')
+  cur_n=${cur_n:-0}
+  if (( cur_n > ${#SAVED[@]} )); then
+    echo "跳过恢复布局: 当前在线 $cur_n 块屏, 保存的配置只有 ${#SAVED[@]} 块（保存时不完整）。"
+    return 1
+  fi
   displayplacer "${SAVED[@]}"
 }
 
 if (( RESTORE )); then
-  apply_saved || { echo "没有可恢复的配置: $STATE"; exit 1; }
+  [[ -f "$STATE" ]] || { echo "没有可恢复的配置: $STATE"; exit 1; }
+  apply_saved
   exit $?
 fi
 
@@ -76,10 +86,10 @@ command -v "$DDC" >/dev/null 2>&1 || { echo "缺少 $DDC: brew install $DDC"; ex
 resolve_idx() {
   local idx=""
   if [[ "$DDC" == "m1ddc" ]]; then
-    idx=$(m1ddc display list detailed 2>/dev/null | awk '
+    idx=$(ddc_run m1ddc display list detailed | awk '
       /^\[[0-9]+\] / { match($0,/^\[[0-9]+\]/); cur=substr($0,RSTART+1,RLENGTH-2); next }
       /- Manufacturer:[ \t]*WSM/ { print cur; exit }')
-    [[ -z "$idx" ]] && idx=$(m1ddc display list 2>/dev/null | awk '/^\[[0-9]+\] W[0-9]/{gsub(/[][]/,"",$1);print $1;exit}')
+    [[ -z "$idx" ]] && idx=$(ddc_run m1ddc display list | awk '/^\[[0-9]+\] W[0-9]/{gsub(/[][]/,"",$1);print $1;exit}')
     # 不再用“最后一块屏”兜底: 多屏机器上会把别的屏当成 WSM, 导致误判正常.
   else
     idx=2
@@ -91,7 +101,7 @@ resolve_idx() {
 resolve_uuid() {
   [[ "$DDC" == "m1ddc" ]] || { print -r -- ""; return; }
   command -v m1ddc >/dev/null 2>&1 || { print -r -- ""; return; }
-  m1ddc display list detailed 2>/dev/null | awk '
+  ddc_run m1ddc display list detailed | awk '
     /^\[[0-9]+\] / { line=$0; next }
     /- Manufacturer:[ \t]*WSM/ {
       if (match(line, /\([0-9A-Fa-f-]+\)/)) print substr(line,RSTART+1,RLENGTH-2)
@@ -99,7 +109,7 @@ resolve_uuid() {
     }'
 }
 
-# DDC 命令加 5 秒超时: 固件卡死时 DDC 调用可能永久挂起
+# 给命令加 5 秒超时: 固件卡死时 DDC/显示列表调用可能永久挂起
 ddc_run() { perl -e 'alarm 5; exec @ARGV' -- "$@" 2>/dev/null; }
 
 # 读亮度; 空输出 = DDC 不可用/卡死
@@ -184,7 +194,10 @@ sec==1 && /mode [0-9]+:/ {
 
   local WSM_UUID
   WSM_UUID=$(resolve_uuid)
+  # WSM 自己的备选模式类型: hz = 只调频率(老机器反复验证有效), sc = 改缩放(仅 -s)
+  WSM_ALT_KIND=""
   if [[ -n "$WSM_UUID" && -n "${ALTKIND[$WSM_UUID]:-}" ]]; then
+    WSM_ALT_KIND="${ALTKIND[$WSM_UUID]}"
     targets=("$WSM_UUID")
   else
     for id in "${order[@]}"; do
@@ -204,14 +217,60 @@ sec==1 && /mode [0-9]+:/ {
 
 load_displays || { echo "displayplacer 未列出任何显示器。"; exit 1; }
 
+# 保存当前在线配置; 当前屏数比已保存的少(有屏不在线)时拒绝覆盖,
+# 否则会用残缺配置冲掉完整配置, 之后 --restore 反而把屏踢掉.
+save_state() {
+  (( ${#cur[@]} )) || return 1
+  local old_n=0
+  [[ -f "$STATE" ]] && old_n=$(grep -c . "$STATE")
+  if (( ${#cur[@]} < old_n )); then
+    echo "跳过保存布局: 当前 ${#cur[@]} 块屏在线, 已保存的是 $old_n 块（有屏不在线）。"
+    return 1
+  fi
+  mkdir -p "${STATE:h}"
+  print -rl -- "${cur[@]}" > "$STATE"
+  return 0
+}
+
 # --save: 保存当前在线显示配置 (看护服务在健康时调用, 保证 --restore 拿到最新布局)
 if (( SAVE )); then
   (( ${#cur[@]} )) || { echo "没有可保存的在线显示器配置。"; exit 1; }
-  mkdir -p "${STATE:h}"
-  print -rl -- "${cur[@]}" > "$STATE"
-  echo "已保存当前三屏配置到 $STATE"
+  if save_state; then
+    echo "已保存当前 ${#cur[@]} 块屏的配置到 $STATE"
+  fi
   exit 0
 fi
+
+# 顺带处理其它屏: CG 能看到但 online=0 的, 先软件接回;
+# 接不回说明视频链路真的断了, 软件无解, 直接告诉用户怎么做.
+scan_other_displays() {
+  local line cgid vend name
+  [[ -x "$DPFIX" ]] || return 0
+  for line in ${(f)"$("$DPFIX" list 2>/dev/null)"}; do
+    [[ "$line" == *"online=0"* ]] || continue
+    cgid=${${line%% *}#id=}
+    vend=${${line#*vendor=}%% *}
+    [[ "$vend" == "0x00005E6D" ]] && continue   # WSM 走主流程
+    case "$vend" in
+      0x0000626C|0x626C) name="sanguang(L32J1/XSL)" ;;
+      *) name="厂商 $vend 的屏" ;;
+    esac
+    if (( DRY )); then
+      echo "另有 $name（CG id $cgid）不在线；正式运行时会先尝试软件接回。"
+      continue
+    fi
+    echo "==> 另有 $name（CG id $cgid）不在线，尝试软件接回"
+    "$DPFIX" on "$cgid" >/dev/null 2>&1
+    sleep 2
+    if "$DPFIX" list 2>/dev/null | grep -q "^id=$cgid online=1"; then
+      echo "已接回 $name。"
+    else
+      echo "接不回 $name：它的视频链路已经断了（Mac 连 EDID 都读不到）。"
+      echo "   请拔掉它的电源线等 15 秒再插回（按电源键/快速插拔复位不了）。"
+    fi
+  done
+}
+scan_other_displays
 
 # --- 0) 屏可能已被 macOS 移出列表: 先尝试软件重新接入 ---
 IDX=$(resolve_idx)
@@ -240,11 +299,35 @@ if [[ -z "$IDX" ]]; then
   fi
   if [[ -z "$IDX" ]]; then
     echo
-    echo "软件层也无法接回。请拔掉这块屏的 USB-C 视频线，等 3 秒再插回 Mac 端；"
-    echo "同一口不行就换一个 USB-C 口。"
+    echo "软件层也无法接回：这块屏的视频链路已经断了（Mac 连 EDID 都读不到）。"
+    echo "请拔掉这块显示器电源线等 15 秒再插回（按电源键/快速插拔复位不了）。"
     exit 1
   fi
 fi
+
+# 检查 WSM 是否已经活了 (刷新全局 IDX/LUM)
+check_fixed() {
+  IDX=$(resolve_idx)
+  [[ -z "$IDX" ]] && return 1
+  LUM=$(read_lum "$IDX")
+  [[ -n "$LUM" && "$LUM" -gt 0 ]]
+}
+
+# 模式重协商: 目标屏切到备选模式 3 秒再切回 (只调频率时是已验证的安全动作)
+retrain_mode() {
+  (( ${#targets[@]} )) || return 1
+  echo "==> 模式重协商 (${targets[*]})"
+  save_state >/dev/null || true
+  if displayplacer "${alt[@]}"; then
+    perl -e 'select(undef,undef,undef,3)'
+    displayplacer "${cur[@]}" || echo "切回原模式失败，请执行 displayplacer list 检查。"
+  else
+    echo "切换备选模式失败。"
+    return 1
+  fi
+  sleep 2
+  return 0
+}
 
 # --- 健康检查 ---
 LUM=$(read_lum "$IDX")
@@ -255,31 +338,36 @@ fi
 
 echo "检测到 WSM 显示器异常（DDC 读数: ${LUM:-无响应}）。"
 if (( DRY )); then
-  echo "[dry-run] 将依次尝试: 软件重新接入 -> DDC 电源唤醒 -> 软件拔插 -> 同分辨率换刷新率 -> 物理拔插提示"
+  [[ "$WSM_ALT_KIND" == "hz" ]] && echo "[dry-run] 会先试: 同分辨率换刷新率 (约 6~10 秒)"
+  echo "[dry-run] 然后依次: DDC 电源唤醒 -> 软件拔插 -> 缩放(仅-s) -> 断电重开提示"
   (( ALLOW_SCALING )) && echo "[dry-run] -s: 允许 HiDPI <-> 1x 切换实验"
   exit 0
 fi
 
-# 动手前保存当前配置, 成功后恢复布局/HiDPI
-if (( ${#cur[@]} )); then
-  mkdir -p "${STATE:h}"
-  print -rl -- "${cur[@]}" > "$STATE"
+# 动手前保存当前配置, 成功后恢复布局/HiDPI (残缺配置不覆盖完整配置)
+save_state >/dev/null || true
+
+# --- 1) 快速路径: 同分辨率换刷新率 (老机器反复验证有效, 只调频率) ---
+if [[ "$WSM_ALT_KIND" == "hz" ]]; then
+  retrain_mode
+  if check_fixed; then
+    echo "已通过换刷新率唤醒（亮度 $LUM）。"
+    exit 0
+  fi
 fi
 
-# --- 1) DDC 电源唤醒 (老机器卡死时 DDC 仍可用, 直接开屏) ---
-if [[ "$DDC" == "m1ddc" ]]; then
+# --- 2) DDC 电源唤醒 (DDC 通信已完全失效时跳过, 反正也会超时) ---
+if [[ "$DDC" == "m1ddc" && -n "${LUM:-}" ]]; then
   echo "==> 尝试 DDC 电源唤醒 (set standby 1)"
   ddc_run m1ddc display "$IDX" set standby 1 >/dev/null || true
-  sleep 5
-  IDX=$(resolve_idx)
-  [[ -n "$IDX" ]] && LUM=$(read_lum "$IDX")
-  if [[ -n "${LUM:-}" && "$LUM" -gt 0 ]]; then
+  sleep 3
+  if check_fixed; then
     echo "已通过 DDC 唤醒（亮度 $LUM）。"
     exit 0
   fi
 fi
 
-# --- 2) 软件拔插 (off -> 2s -> on), 重建显示管线 ---
+# --- 3) 软件拔插 (off -> 2s -> on), 重建显示管线 ---
 if [[ -x "$DPFIX" ]]; then
   line=$("$DPFIX" find 2>/dev/null | awk '$2=="online=1"{print; exit}')
   if [[ -n "$line" ]]; then
@@ -290,32 +378,17 @@ if [[ -x "$DPFIX" ]]; then
     apply_saved >/dev/null 2>&1
     load_displays || true
     sleep 2
-    IDX=$(resolve_idx)
-    [[ -n "$IDX" ]] && LUM=$(read_lum "$IDX")
-    if [[ -n "${LUM:-}" && "$LUM" -gt 0 ]]; then
+    if check_fixed; then
       echo "已通过软件拔插唤醒（亮度 $LUM）。"
       exit 0
     fi
   fi
 fi
 
-# --- 3) 同分辨率模式重协商 (只调频率; -s 时才允许 HiDPI <-> 1x) ---
-if (( ${#targets[@]} == 0 )); then
-  echo "没有可用的同分辨率备选模式，跳过重协商。"
-else
-  echo "==> 同分辨率模式重协商 (${targets[*]})"
-  mkdir -p "${STATE:h}"
-  print -rl -- "${cur[@]}" > "$STATE"
-  if displayplacer "${alt[@]}"; then
-    perl -e 'select(undef,undef,undef,3)'
-    displayplacer "${cur[@]}" || echo "切回原模式失败，请执行 displayplacer list 检查。"
-  else
-    echo "切换备选模式失败。"
-  fi
-  sleep 2
-  IDX=$(resolve_idx)
-  [[ -n "$IDX" ]] && LUM=$(read_lum "$IDX")
-  if [[ -n "${LUM:-}" && "$LUM" -gt 0 ]]; then
+# --- 4) 其它重协商 (仅 -s 的缩放方案; 或本屏没有备选模式时调别的屏) ---
+if [[ "$WSM_ALT_KIND" == "sc" ]] || { [[ -z "$WSM_ALT_KIND" ]] && (( ${#targets[@]} > 0 )); }; then
+  retrain_mode
+  if check_fixed; then
     echo "重协商后已唤醒（亮度 $LUM）。"
     exit 0
   fi
@@ -323,7 +396,7 @@ fi
 
 echo
 echo "自动修复失败。请按顺序操作："
-echo "  1) 拔掉这块屏的 USB-C 视频线，等 3 秒插回 Mac 端（只关显示器电源不够）。"
-echo "  2) 同一口无效就换一个 USB-C 口。"
+echo "  1) 拔掉这块显示器电源线，等 15 秒再插回（按电源键/快速插拔复位不了，要等电容放电）。"
+echo "  2) 同一口无效就换一个视频口。"
 echo "  3) 恢复后进显示器 OSD：关闭 Deep Sleep/ECO，DP 版本设为 1.2，DDC/CI 打开，输入源固定。"
 exit 1

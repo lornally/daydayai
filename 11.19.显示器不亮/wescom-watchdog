@@ -1,21 +1,28 @@
 #!/bin/zsh
-# wescom-watchdog — WSM/wescom 显示器每次被唤醒后自动检查并尝试恢复
+# wescom-watchdog — 每个亮屏周期自动检查所有外接屏, 卡死时快速恢复
 #
-# 判断方法: 正常时 DDC 能读到亮度 (>0); 卡死时读 0 或通信失败.
-# 只在"显示器刚从灭变亮"后的窗口内检查 (pmset 日志门控),
-# 正常休眠/关屏期间不会动作.
-# 连续 3 次异常 → 调用 fix-wescom -s:
-#   软件重新接入/软件拔插 -> DDC 电源唤醒 -> 同分辨率换刷新率 -> HiDPI<->1x
-# 仍失败 → 桌面通知, 提示拔插 USB-C 线; 屏被踢掉时, 插回后自动恢复原布局.
+# 亮屏后 5 秒开始, 每 3 秒一轮, 共查 90 秒:
+#   A. CG 里 online=0 的屏(在线时掉链路) -> 先试软件接回 wescom-dpfix on;
+#      接不回 = 视频链路真的断了 -> 立刻桌面通知, 这种只能关显示器电源再开/拔插视频线.
+#   B. WSM/wescom 屏 DDC 读不到(0/超时) 连续 3 次 -> fix-wescom -s
+#      (新版顺序: 同分辨率换刷新率 ~6-10 秒 -> DDC 唤醒 -> 软件拔插 -> 缩放仅-s).
+#   C. 修复失败 -> 桌面通知.
 #
+# 判据: 正常时 DDC 能读到亮度 (>0); 卡死时读 0 或通信失败.
+# 只在"显示器刚从灭变亮"后的窗口内动作, 正常熄屏/睡眠期间不动.
 # 设计说明与各机器差异见同目录 README.md.
 
 set -u
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 FIX="$HOME/.local/bin/fix-wescom"
+DPFIX="$HOME/.local/bin/wescom-dpfix"
 LOG="/tmp/wescom-watchdog.log"
-INTERVAL=10
+INTERVAL=10          # 空闲轮询间隔
+CHECK_INTERVAL=3     # 亮屏检查窗口内的轮询间隔
+SCAN_EVERY=15        # offline 扫描最小间隔(秒)
+START_DELAY=5        # 亮屏后等待 DDC/链路就绪
+WINDOW=90            # 亮屏检查窗口(秒)
 ARCH=$(uname -m)
 
 if [[ "$ARCH" == "arm64" ]]; then
@@ -28,17 +35,17 @@ fi
 
 log() { echo "$(date '+%F %T') $*" >>"$LOG"; }
 
-# DDC 命令加 5 秒超时: 固件卡死时 DDC 调用可能永久挂起
+# 给命令加 5 秒超时: 固件卡死时 DDC 调用可能永久挂起
 ddc_run() { perl -e 'alarm 5; exec @ARGV' -- "$@" 2>/dev/null; }
 
 # 找 WSM 屏的 DDC 序号 (m1ddc 按厂商匹配, 不硬编码型号)
 resolve_idx() {
   local idx=""
   if [[ "$DDC" == "m1ddc" ]]; then
-    idx=$(m1ddc display list detailed 2>/dev/null | awk '
+    idx=$(ddc_run m1ddc display list detailed | awk '
       /^\[[0-9]+\] / { match($0,/^\[[0-9]+\]/); cur=substr($0,RSTART+1,RLENGTH-2); next }
       /- Manufacturer:[ \t]*WSM/ { print cur; exit }')
-    [[ -z "$idx" ]] && idx=$(m1ddc display list 2>/dev/null | awk '/^\[[0-9]+\] W[0-9]/{gsub(/[][]/,"",$1);print $1;exit}')
+    [[ -z "$idx" ]] && idx=$(ddc_run m1ddc display list | awk '/^\[[0-9]+\] W[0-9]/{gsub(/[][]/,"",$1);print $1;exit}')
     # 不再用“最后一块屏”兜底: 多屏机器上会把别的屏当成 WSM, 导致误判正常.
   else
     idx=2
@@ -58,18 +65,85 @@ read_lum() {
 
 notify() {
   local msg=$1
-  osascript -e "display notification \"$msg\" with title \"WSM 显示器\"" >/dev/null 2>&1 || true
+  osascript -e "display notification \"$msg\" with title \"显示器\"" >/dev/null 2>&1 || true
   log "notify: $msg"
+}
+
+display_name_for_vendor() {
+  case "$1" in
+    0x00005E6D|0x5E6D) echo "wescom(WSM)" ;;
+    0x0000626C|0x626C) echo "sanguang(L32J1/XSL)" ;;
+    *) echo "厂商 $1 的屏" ;;
+  esac
+}
+
+# 软件接回所有 CG 能看到但 offline 的屏 (WSM 由主流程处理)
+# 接不回的: 说明视频链路已经断了, 软件无解, 通知用户断电重开
+scan_offline() {
+  local line cgid vend name
+  [[ -x "$DPFIX" ]] || return 0
+  for line in ${(f)"$("$DPFIX" list 2>/dev/null)"}; do
+    [[ "$line" == *"online=0"* ]] || continue
+    cgid=${${line%% *}#id=}
+    vend=${${line#*vendor=}%% *}
+    [[ "$vend" == "0x00005E6D" ]] && continue   # WSM 走主流程
+    name=$(display_name_for_vendor "$vend")
+    log "offline display $cgid $name -> try software reconnect"
+    "$DPFIX" on "$cgid" >/dev/null 2>&1
+    sleep 2
+    if "$DPFIX" list 2>/dev/null | grep -q "^id=$cgid online=1"; then
+      log "display $cgid reconnected"
+    else
+      log "display $cgid link down (software reconnect failed)"
+      if (( offline_notified == 0 )); then
+        offline_notified=1
+        notify "$name 掉线了（视频链路已断，软件接不回）。请拔掉它的电源线等 15 秒再插回；按电源键或马上插回都没用。"
+      fi
+    fi
+  done
+}
+
+# WSM 不在 DDC 列表里时判断它的真实状态:
+#   返回 0 = CG 里 online (DDC 挂了, 算一次坏读数)
+#   返回 1 = CG 里 offline, 软件接回成功
+#   返回 2 = 链路断了/系统里没有, 已通知, 本轮放弃
+handle_wsm_missing() {
+  local out wsm_line cgid
+  [[ -x "$DPFIX" ]] || return 0
+  out=$("$DPFIX" find 2>/dev/null)
+  if print -r -- "$out" | grep -q 'online=1'; then
+    log "WSM online in CG but DDC list unavailable (DDC dead)"
+    return 0
+  fi
+  wsm_line=$(print -r -- "$out" | awk '$2=="online=0"{print;exit}')
+  if [[ -n "$wsm_line" ]]; then
+    cgid=${wsm_line%% *}
+    log "WSM offline in CG -> try software reconnect (id $cgid)"
+    "$DPFIX" on "$cgid" >/dev/null 2>&1
+    sleep 2
+    if [[ -n "$(resolve_idx)" ]]; then
+      log "WSM reconnected by software"
+      return 1
+    fi
+    log "WSM software reconnect failed"
+    notify "wescom(WSM) 视频链路掉了，软件接不回。请拔掉它的电源线等 15 秒再插回；按电源键或马上插回都没用。"
+  else
+    log "WSM not present in CG at all"
+    notify "系统里看不到 wescom(WSM) 屏了（线松/断电？），请检查它的视频线和电源。"
+  fi
+  return 2
 }
 
 prev=off
 armed=1
 check_start=$(( $(date +%s) + 15 ))   # 开机/登录后先等 DDC 就绪
-deadline=$(( $(date +%s) + 105 ))
+deadline=$(( $(date +%s) + 15 + WINDOW ))
 bad=0
 saved=0
 pending_restore=0
 restore_deadline=0
+offline_notified=0
+last_scan=0
 
 while true; do
   last=$(pmset -g log 2>/dev/null | grep -E 'Display is turned (on|off)' | tail -1)
@@ -95,7 +169,7 @@ while true; do
           notify "显示器已重新接入，原 HiDPI/布局已恢复。"
         else
           log "layout restored but display still black (lum=${lum:-none})"
-          notify "显示器已重新接入、布局已恢复，但屏仍黑。请再拔插一次 USB-C 线。"
+          notify "显示器已重新接入、布局已恢复，但屏仍黑。请再拔插一次视频线。"
         fi
       fi
     else
@@ -105,10 +179,10 @@ while true; do
   fi
 
   if [[ "$state" == "on" && "$prev" != "on" ]]; then
-    armed=1; bad=0; saved=0
-    check_start=$((now+15))
-    deadline=$((now+105))
-    log "display on -> checking in 15s"
+    armed=1; bad=0; saved=0; offline_notified=0; last_scan=0
+    check_start=$((now+START_DELAY))
+    deadline=$((now+WINDOW))
+    log "display on -> checking in ${START_DELAY}s"
   fi
   prev=$state
 
@@ -117,22 +191,37 @@ while true; do
       armed=0
       log "check window closed"
     elif (( now >= check_start )); then
+
+      # A. 掉链路的其它屏 (软件能接回就接, 接不回立刻通知)
+      if (( now - last_scan >= SCAN_EVERY )); then
+        last_scan=$now
+        scan_offline
+      fi
+
       idx=$(resolve_idx)
       if [[ -z "$idx" ]]; then
-        lum=""
+        handle_wsm_missing
+        case $? in
+          0) lum="" ;;            # CG 在线但 DDC 死了: 按坏读数处理
+          1) idx=$(resolve_idx); lum=$(read_lum "$idx") ;;
+          2) armed=0; lum="" ;;   # 链路断了, 已通知
+        esac
       else
         lum=$(read_lum "$idx")
       fi
 
-      if [[ -z "$lum" || "$lum" -eq 0 ]]; then
-        bad=$((bad+1))
-        log "bad reading ${bad}/3 (idx=${idx:-none} lum=${lum:-none})"
-      else
-        bad=0
-        # 健康时保存一份最新三屏配置, 供软件重连后的 --restore 用
-        if (( saved == 0 )) && [[ -x "$FIX" ]]; then
-          "$FIX" --save >>"$LOG" 2>&1
-          saved=1
+      if [[ "$armed" -eq 1 ]]; then
+        if [[ -z "$lum" || "$lum" -eq 0 ]]; then
+          bad=$((bad+1))
+          log "bad reading ${bad}/3 (idx=${idx:-none} lum=${lum:-none})"
+        else
+          bad=0
+          # 健康时保存一份完整配置, 供软件重连后的 --restore 用
+          # (fix-wescom --save 自己会拒绝用残缺配置覆盖完整配置)
+          if (( saved == 0 )) && [[ -x "$FIX" ]]; then
+            "$FIX" --save >>"$LOG" 2>&1
+            saved=1
+          fi
         fi
       fi
 
@@ -140,7 +229,7 @@ while true; do
         armed=0; bad=0
         log "WSM stuck, running fix-wescom -s"
         "$FIX" -s >>"$LOG" 2>&1
-        sleep 10
+        sleep 3
         idx=$(resolve_idx)
         if [[ -z "$idx" ]]; then
           lum=""
@@ -153,7 +242,7 @@ while true; do
             pending_restore=1
             restore_deadline=$(( $(date +%s) + 1800 ))
           fi
-          notify "显示器卡死，自动恢复失败。请拔插这块屏的 USB-C 视频线（Mac 端）；插回后会自动恢复原 HiDPI/布局。"
+          notify "wescom(WSM) 卡死，自动恢复失败。请拔掉它的电源线等 15 秒再插回（按电源键没用）；插回后会自动恢复原布局。"
         else
           log "fix ok (lum=$lum)"
         fi
@@ -161,5 +250,9 @@ while true; do
     fi
   fi
 
-  sleep $INTERVAL
+  if (( armed )); then
+    sleep $CHECK_INTERVAL
+  else
+    sleep $INTERVAL
+  fi
 done

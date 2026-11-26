@@ -377,3 +377,72 @@ WindowServer 即使把它移出桌面，也可以用私有 SkyLight 接口把它
 - 私有 API 未来可能变动；工具在运行时 dlopen/dlsym，符号缺失只降级不崩溃。
 - 2026-11-26 在 macOS 15.8.3 补测：符号正常、`find` 能认出 WSM；
   `off 2` → `online=0` → `on 2` → `online=1` 全程不拔线，布局和 DDC 亮度(49)都保持。
+
+## 13. 2026-11-26 更新（macOS 15 机器，第二次升级后）
+
+### 13.1 现象与结论：新脚本自己变慢了
+
+用户反馈“换新脚本后好几次过好久显示器才亮”。看护日志实测：14:10:37 唤醒 → 14:12:19 才恢复，约 **102 秒**；
+11.19 老脚本约 25~40 秒。根因是脚本时序/顺序，不是显示器变差：
+
+1. **检测慢**：亮屏后先等 15 秒，再要连续 3 次坏读数；每次 `m1ddc display list` 没加超时，卡死时单次会挂 20 秒+，
+   实际约 70 秒才开始修。
+2. **修复顺序不对**：先 DDC 电源唤醒、再软件拔插，最后才做老机器反复验证有效的“换刷新率”。
+   14:11 的日志证明前两步都没救活，真正起效的是最后一步，白等约 20 秒。
+3. **`--save` 会用残缺配置覆盖完整配置**（18:07 保存的只剩 WSM 一块屏），之后 `--restore` 反而会把多出来的屏踢掉。
+
+### 13.2 当天另一个发现：另一块屏（sanguang / L32J1，厂商 XSL）掉链路
+
+- WindowServer 日志：17:14:58 hotplug **in**（display id 4），17:14:59 又 hotplug **out** ——
+  显示器自己在唤醒 1.7 秒后把 DP 链路掉了，之后一直没回来。
+- 这是“链路真的断了”，不是 macOS 把屏移出桌面：`displayplacer`、`m1ddc`、`system_profiler` 完全看不到它，
+  `ioreg` 里 dispext0 的 AppleCLCD2 连 EDID 都没有；`wescom-dpfix on 4` 返回 5
+  （`CGCompleteDisplayConfiguration` 失败）。软件无解，只能拔电源线等 15 秒再插回（详见 §13.6）。
+- 区分方法：`wescom-dpfix list` 里 `online=0` 且 `on` 失败 = 链路断了；
+  `online=0` 且 `on` 成功 = macOS 桌面层问题（软件可救）。
+
+### 13.3 本次改动
+
+- `wescom-watchdog`：亮屏后 **5 秒**开始、**每 3 秒**一轮、窗口 90 秒；连续 3 次坏读数即修复。
+  同时扫描所有 CG 里 `online=0` 的其它屏：先软件接回，接不回立刻桌面通知（提示断电重开）。
+- `fix-wescom`：恢复顺序改为 **换刷新率（仅 hz 备选）→ DDC 唤醒 → 软件拔插 → 缩放（仅 -s）**。
+  所有 `m1ddc` 列表调用加 5 秒超时；DDC 完全无响应（读数为空）时跳过 DDC 唤醒，少等约 10 秒。
+- `--save` / `--restore` 防残缺配置：当前屏数少于已保存屏数时拒绝覆盖/恢复。
+- 新增 `scan_other_displays`：手动跑 `fix-wescom` 也会顺手处理其它 offline 屏（WSM 主流程不变）。
+
+### 13.4 验证
+
+- `fix-wescom -n` 应输出 WSM 状态 + 不在线屏的提示（本机实测：识别出 sanguang 不在线）。
+- 看护日志新格式：`display on -> checking in 5s`、`offline display 4 ... link down`。
+- 下次 WSM 卡死时，日志应看到先做“模式重协商”，且整个恢复在 30~40 秒内完成。
+
+### 13.5 “macOS 不能直接触发重新检测吗？”——能，但对本机的 sanguang 无效
+
+macOS 内部确实有“重新检测显示器”的实现，2026-11-26 已在本机确认并反汇编：
+
+- `SLSDetectDisplays()`（SkyLight / DisplayServices 私有符号，无参数）就是老的“Detect Displays”实现：
+  它列出系统显示列表，对每块屏用 `SLSServiceForDisplayNumber(id, &svc)` 拿到 IO 服务，
+  再对服务发 `IOServiceRequestProbe(svc, 1)`。
+- 但这套只能探测“系统里还有 IO 服务”的屏。对已经掉链路的 sanguang（XSL，cgid 4）实测：
+  - `SLSServiceForDisplayNumber(4)` 返回 0 但 `svc = 0` —— 没有可探测对象；
+  - 直接对 `dispext0` 的 AppleCLCD2 / dcpdptx-port 服务发 `IOServiceRequestProbe` → `0xE00002C7`（kIOReturnUnsupported）；
+  - `ioreg` 里 dispext0 的 AppleCLCD2 没有任何 EDID/DisplayAttributes（WSM 的节点有）。
+- 结论：`online=0` 且 `SLSServiceForDisplayNumber` 拿不到服务 = 链路彻底断了，macOS 侧没有触发入口
+  （既不能 `on`，也不能 probe）。只能物理断电重开显示器 / 拔插视频线 / 换口换线。
+
+### 13.6 2026-11-26 晚确认：sanguang 是整机固件死机，复位必须断电 ≥15 秒
+
+现场操作记录（本次故障的真实恢复过程）：
+
+- 菜单键、电源键全无反应（OSD 弹不出来 → 排除“输入源切错”）；
+- 快速插拔电源线无效；
+- **拔掉电源线、等 15 秒再插回** → 恢复；同一条视频线、同一个 Mac 口，布局和 75Hz 主屏原样回来；
+- 拔掉电源后电源键 LED 还在闪（先彩色、后白色）—— 是电源电容的余电在维持主控。
+
+结论：
+
+- 故障在显示器固件/主控，和 Mac、线、口**无关**（同一根线同一个口，断电复位后完全正常）。
+- 复位方法：**拔电源线 ≥15 秒**。如果拔了电源灯还亮/还闪，说明余电没放完，继续等
+  （或把视频线也拔掉）。按电源键、快速插拔、显示器开关都不算断电。
+- 和 wescom 同属廉价屏 DPMS 唤醒固件问题，但这台表现更狠：整机死机、链路全掉、按键全无响应。
+  所以“关显示器电源再开”这类建议对它是无效的，必须拔电源。
