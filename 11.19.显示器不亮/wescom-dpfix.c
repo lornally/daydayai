@@ -104,7 +104,10 @@ static int set_connected(CGDirectDisplayID id, bool on) {
         CGCancelDisplayConfiguration(cfg);
         return 4;
     }
-    return CGCompleteDisplayConfiguration(cfg, kCGConfigurePermanently) == kCGErrorSuccess ? 0 : 5;
+
+    // 用 session 级而不是 permanent: 万一 off 之后进程被打断(被杀/休眠),
+    // 缺屏状态不会写进永久显示配置, 重新登录或重启即恢复.
+    return CGCompleteDisplayConfiguration(cfg, kCGConfigureForSession) == kCGErrorSuccess ? 0 : 5;
 }
 
 int main(int argc, char **argv) {

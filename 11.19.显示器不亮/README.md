@@ -348,7 +348,8 @@ WindowServer 即使把它移出桌面，也可以用私有 SkyLight 接口把它
 - `SLSConfigureDisplayIndependentOutput(cfg, displayID, bool)`
 - `SLSConfigureDisplayEnabled(cfg, displayID, bool)`
 
-配合公开的 `CGBeginDisplayConfiguration` / `CGCompleteDisplayConfiguration(cfg, .permanently)`：
+配合公开的 `CGBeginDisplayConfiguration` / `CGCompleteDisplayConfiguration(cfg, .forSession)`
+（2026-11-26 起由 `.permanently` 改为 session 级：`off` 之后若进程被打断，缺屏状态不会写进永久配置）：
 
 - 接回：`IndependentOutput=false` + `Enabled=true`
 - 移出：`IndependentOutput=true`
@@ -374,3 +375,5 @@ WindowServer 即使把它移出桌面，也可以用私有 SkyLight 接口把它
 - Intel + macOS 12：SkyLight 符号是否存在未验证；`wescom-dpfix` 启动时会检查，缺失则退出码 10，
   `fix-wescom` 自动回退到 DDC/刷新率/物理拔插方案。
 - 私有 API 未来可能变动；工具在运行时 dlopen/dlsym，符号缺失只降级不崩溃。
+- 2026-11-26 在 macOS 15.8.3 补测：符号正常、`find` 能认出 WSM；
+  `off 2` → `online=0` → `on 2` → `online=1` 全程不拔线，布局和 DDC 亮度(49)都保持。
