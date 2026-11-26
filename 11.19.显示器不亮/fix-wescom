@@ -18,6 +18,7 @@
 # 用法: fix-wescom        (自动检测并修复)
 #       fix-wescom -n     (只检查并打印将执行的动作, 不修改)
 #       fix-wescom -s     (允许 HiDPI <-> 1x 切换实验)
+#       fix-wescom --force (跳过健康检查, 强制做一次换刷新率; 用于"面板黑但 DDC 报健康")
 #       fix-wescom --save     (保存当前三屏配置, 供 --restore 用)
 #       fix-wescom --restore  (恢复上次保存的模式/布局)
 #
@@ -31,10 +32,12 @@ DRY=0
 ALLOW_SCALING=0
 RESTORE=0
 SAVE=0
+FORCE=0
 for arg in "$@"; do
   case "$arg" in
     -n) DRY=1 ;;
     -s) ALLOW_SCALING=1 ;;
+    --force) FORCE=1 ;;
     --restore) RESTORE=1 ;;
     --save) SAVE=1 ;;
   esac
@@ -331,9 +334,29 @@ retrain_mode() {
 
 # --- 健康检查 ---
 LUM=$(read_lum "$IDX")
-if [[ -n "$LUM" && "$LUM" -gt 0 ]]; then
+if [[ -n "$LUM" && "$LUM" -gt 0 && "$FORCE" -eq 0 ]]; then
   echo "WSM 显示器正常（DDC 亮度 $LUM），无需修复。"
   exit 0
+fi
+
+# --- 强制模式: 用于"面板黑但 DDC 还返回旧值" (看护脚本无法识破这种情况) ---
+if (( FORCE )); then
+  if (( DRY )); then
+    echo "[dry-run] 强制模式: 会做一次同分辨率换刷新率重协商（DDC 当前读数: ${LUM:-无响应}）。"
+    exit 0
+  fi
+  if [[ "$WSM_ALT_KIND" != "hz" ]]; then
+    echo "强制模式: 本机没有同分辨率换刷新率的备选模式，不动作。"
+    exit 1
+  fi
+  echo "强制模式: 跳过健康检查，直接做一次模式重协商（DDC 当前读数: ${LUM:-无响应}）。"
+  retrain_mode
+  if check_fixed; then
+    echo "重协商完成（DDC 亮度 $LUM）。"
+    exit 0
+  fi
+  echo "重协商后仍读不到亮度，请按自动修复流程处理。"
+  exit 1
 fi
 
 echo "检测到 WSM 显示器异常（DDC 读数: ${LUM:-无响应}）。"

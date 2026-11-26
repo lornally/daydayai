@@ -2,6 +2,8 @@
 # wescom-watchdog — 每个亮屏周期自动检查所有外接屏, 卡死时快速恢复
 #
 # 亮屏后 5 秒开始, 每 3 秒一轮, 共查 90 秒:
+#   0. 熄屏 ≥20 分钟的唤醒: 先主动做一次换刷新率 (fix-wescom --force).
+#      实测面板可能从唤醒起就是黑的, 但 DDC 仍返回旧亮度, 会骗过正常检测 20+ 秒.
 #   A. CG 里 online=0 的屏(在线时掉链路) -> 先试软件接回 wescom-dpfix on;
 #      接不回 = 视频链路真的断了 -> 立刻桌面通知, 这种只能关显示器电源再开/拔插视频线.
 #   B. WSM/wescom 屏 DDC 读不到(0/超时) 连续 3 次 -> fix-wescom -s
@@ -23,6 +25,7 @@ CHECK_INTERVAL=3     # 亮屏检查窗口内的轮询间隔
 SCAN_EVERY=15        # offline 扫描最小间隔(秒)
 START_DELAY=5        # 亮屏后等待 DDC/链路就绪
 WINDOW=90            # 亮屏检查窗口(秒)
+PROACTIVE_MIN_OFF=1200   # 熄屏 ≥20 分钟的唤醒: 先主动重协商一次 (面板可能黑但 DDC 报假健康)
 ARCH=$(uname -m)
 
 if [[ "$ARCH" == "arm64" ]]; then
@@ -67,6 +70,28 @@ notify() {
   local msg=$1
   osascript -e "display notification \"$msg\" with title \"显示器\"" >/dev/null 2>&1 || true
   log "notify: $msg"
+}
+
+# 上一次熄屏时长 / 亮屏事件距现在多久(秒), 输出 "off_secs on_age"
+display_times() {
+  local ev off_line on_line off_ts on_ts off_e on_e now
+  ev=$(pmset -g log 2>/dev/null | grep -E 'Display is turned (on|off)' | tail -2)
+  off_line=$(print -r -- "$ev" | grep 'turned off' | tail -1)
+  on_line=$(print -r -- "$ev" | grep 'turned on' | tail -1)
+  if [[ -z "$off_line" || -z "$on_line" ]]; then
+    print "0 99999"; return
+  fi
+  off_ts=$(print -r -- "$off_line" | awk '{print $1" "$2}')
+  on_ts=$(print -r -- "$on_line" | awk '{print $1" "$2}')
+  off_e=$(date -j -f "%Y-%m-%d %H:%M:%S" "$off_ts" +%s 2>/dev/null)
+  on_e=$(date -j -f "%Y-%m-%d %H:%M:%S" "$on_ts" +%s 2>/dev/null)
+  now=$(date +%s)
+  if [[ -z "$off_e" || -z "$on_e" ]] || (( on_e <= off_e )); then
+    print "0 99999"; return
+  fi
+  local age=$(( now - on_e ))
+  (( age < 0 )) && age=99999
+  print "$(( on_e - off_e )) $age"
 }
 
 display_name_for_vendor() {
@@ -144,6 +169,8 @@ pending_restore=0
 restore_deadline=0
 offline_notified=0
 last_scan=0
+proactive=0
+off_secs=0
 
 while true; do
   last=$(pmset -g log 2>/dev/null | grep -E 'Display is turned (on|off)' | tail -1)
@@ -182,7 +209,16 @@ while true; do
     armed=1; bad=0; saved=0; offline_notified=0; last_scan=0
     check_start=$((now+START_DELAY))
     deadline=$((now+WINDOW))
-    log "display on -> checking in ${START_DELAY}s"
+    proactive=0
+    read off_secs on_age <<<"$(display_times)"
+    log "display on (off ${off_secs}s) -> checking in ${START_DELAY}s"
+    # 长睡唤醒: 面板可能从唤醒起就是黑的, 但 DDC 还一直返回旧亮度(实测能骗 20+ 秒).
+    # 这种情况下等到 DDC 变坏再修要多花半分钟, 所以主动先做一次换刷新率.
+    # on_age 用来排除"看护服务刚重启时把很久前的亮屏当成新唤醒".
+    if (( off_secs >= PROACTIVE_MIN_OFF && on_age <= 120 )); then
+      proactive=1
+      log "long display sleep (${off_secs}s) -> proactive retrain planned"
+    fi
   fi
   prev=$state
 
@@ -210,6 +246,26 @@ while true; do
         lum=$(read_lum "$idx")
       fi
 
+      # 长睡唤醒的预修复: 只在 DDC 报"健康"时做 (说明正处在假健康盲区);
+      # DDC 已经是坏的, 交给正常检测/修复流程, 避免白闪两次.
+      if (( proactive )); then
+        proactive=0
+        if [[ -n "$idx" && -n "$lum" && "$lum" -gt 0 ]]; then
+          log "proactive retrain (off ${off_secs}s, lum=$lum)"
+          "$FIX" --force >>"$LOG" 2>&1
+          sleep 1
+          idx=$(resolve_idx)
+          if [[ -n "$idx" ]]; then
+            lum=$(read_lum "$idx")
+          else
+            lum=""
+          fi
+          log "proactive retrain done (idx=${idx:-none} lum=${lum:-none})"
+        else
+          log "proactive retrain skipped (display already reporting bad: lum=${lum:-none})"
+        fi
+      fi
+
       if [[ "$armed" -eq 1 ]]; then
         if [[ -z "$lum" || "$lum" -eq 0 ]]; then
           bad=$((bad+1))
@@ -219,6 +275,10 @@ while true; do
           # 健康时保存一份完整配置, 供软件重连后的 --restore 用
           # (fix-wescom --save 自己会拒绝用残缺配置覆盖完整配置)
           if (( saved == 0 )) && [[ -x "$FIX" ]]; then
+            # 记一次 DDC 特征值: 下次排查“面板黑但 DDC 报健康”时对比用
+            standby=""
+            [[ "$DDC" == "m1ddc" && -n "$idx" ]] && standby=$(ddc_run m1ddc display "$idx" get standby | tr -dc '0-9')
+            log "health ok (idx=$idx lum=$lum standby=${standby:-none})"
             "$FIX" --save >>"$LOG" 2>&1
             saved=1
           fi
