@@ -7,8 +7,10 @@
 #   A. CG 里 online=0 的其它屏: 只记录/通知, 不做任何软件接回或显示配置动作.
 #      (11.27 实测: 对 sanguang 写 DDC 电源会立刻断链路; 11.26 全量配置也会.
 #       这类屏不归本服务管, 恢复只有物理断电.)
-#   B. 只对 WSM/wescom 屏动作: DDC 读不到(0/超时) 连续 3 次 -> fix-wescom -s
-#      (顺序: 同分辨率换刷新率 ~6-10 秒 -> 软件拔插 -> 缩放仅-s; DDC 电源默认不写).
+#   B. 只对 WSM/wescom 屏动作: DDC 读不到(0/超时) 连续 3 次 -> fix-wescom
+#      (自动只做同分辨率、向下换刷新率 + 软件拔插; 不改分辨率/缩放.
+#       HiDPI <-> 1x 只在手动 fix-wescom -s 时做; DDC 电源默认不写.
+#       DDC 亮度/电源状态只读, 从不写亮度——亮度是用户设置, 也不能唤醒显示器.)
 #   C. 修复失败 -> 桌面通知.
 #
 # 判据: 正常时 DDC 能读到亮度 (>0); 卡死时读 0 或通信失败.
@@ -290,8 +292,8 @@ while true; do
 
       if (( bad >= 3 )); then
         armed=0; bad=0
-        log "WSM stuck, running fix-wescom -s"
-        "$FIX" -s >>"$LOG" 2>&1
+        log "WSM stuck, running fix-wescom"
+        "$FIX" >>"$LOG" 2>&1
         sleep 3
         idx=$(resolve_idx)
         if [[ -z "$idx" ]]; then
