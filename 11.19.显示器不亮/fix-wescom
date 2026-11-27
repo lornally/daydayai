@@ -6,19 +6,23 @@
 #
 # 修复顺序 (按各机器实测有效 + 恢复速度排序):
 #   0. 屏已被 macOS 移出列表 -> 私有 SkyLight 接口软件重新接入 (wescom-dpfix on).
-#   1. 同分辨率换刷新率重协商 —— 只调频率, 不改分辨率, 约 6~10 秒.
+#   1. 同分辨率换刷新率重协商 —— 只调频率、只向下, 不改分辨率, 约 6~10 秒.
 #      这是 11.19 老机器反复验证有效的方案, 所以放最前; EDID 里没有备用
 #      刷新率的机器自动跳过 (另一台 os27 机器就属于这种).
-#   2. DDC 电源唤醒 (m1ddc set standby 1) —— 不闪屏; DDC 已完全失效时跳过.
-#   3. 软件拔插 (wescom-dpfix replug: off -> 2 秒 -> on) —— 不拔线, 重建显示管线.
-#   4. HiDPI <-> 1x 切换 —— 仅 -s 且第 1 步不可用时启用, 会改 backing 分辨率.
-#   5. 都失败 -> 提示拔显示器电源线等 15 秒再插回 (按键/快速插拔复位不了).
-# 另外会顺手把 CG 里 online=0 的其它屏软件接回 (接不回的提示用户拔电源 15 秒).
+#   2. 软件拔插 (wescom-dpfix replug: off -> 2 秒 -> on) —— 不拔线, 重建显示管线.
+#   3. HiDPI <-> 1x 切换 —— 仅 -s 且第 1 步不可用时启用, 会改 backing 分辨率.
+#   4. 都失败 -> 提示拔显示器电源线等 15 秒再插回 (按键/快速插拔复位不了).
+#
+# 边界: 以上所有动作只针对 WSM 屏; 其它屏一律不碰 (只报告).
+#       11.26 实测全量 displayplacer 配置会把脆弱的 sanguang 踹掉链路;
+#       11.27 实测对 sanguang 写 DDC 电源寄存器 (standby) 也会立刻断链路.
+#       所以 DDC 电源写入默认关闭, 只有 --ddc-power 才执行.
 #
 # 用法: fix-wescom        (自动检测并修复)
 #       fix-wescom -n     (只检查并打印将执行的动作, 不修改)
 #       fix-wescom -s     (允许 HiDPI <-> 1x 切换实验)
 #       fix-wescom --force (跳过健康检查, 强制做一次换刷新率; 用于"面板黑但 DDC 报健康")
+#       fix-wescom --ddc-power (额外允许 DDC 电源唤醒; 默认关闭, 可能弄断脆弱屏的链路)
 #       fix-wescom --save     (保存当前三屏配置, 供 --restore 用)
 #       fix-wescom --restore  (恢复上次保存的模式/布局)
 #
@@ -33,11 +37,13 @@ ALLOW_SCALING=0
 RESTORE=0
 SAVE=0
 FORCE=0
+DDC_POWER=0
 for arg in "$@"; do
   case "$arg" in
     -n) DRY=1 ;;
     -s) ALLOW_SCALING=1 ;;
     --force) FORCE=1 ;;
+    --ddc-power) DDC_POWER=1 ;;
     --restore) RESTORE=1 ;;
     --save) SAVE=1 ;;
   esac
@@ -59,7 +65,9 @@ if [[ ! -x "$DPFIX" ]]; then
   DPFIX="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/wescom-dpfix"
 fi
 
-# 把保存的完整配置恢复回来
+# 恢复保存的 WSM 模式/位置.
+# 只提交 WSM 一条: displayplacer 对其它屏(哪怕模式没变)重复提交也可能触发
+# 链路重训练, 11.26 实测全量配置会把脆弱的 sanguang 踹掉链路.
 apply_saved() {
   [[ -f "$STATE" ]] || return 1
   typeset -a SAVED
@@ -67,6 +75,19 @@ apply_saved() {
     [[ -n "$line" ]] && SAVED+=("$line")
   done < "$STATE"
   (( ${#SAVED[@]} )) || return 1
+  local wsm; wsm=$(resolve_uuid)
+  if [[ -z "$wsm" ]]; then
+    echo "跳过恢复: 找不到 WSM 的 CG UUID（它不在线）。"
+    return 1
+  fi
+  local line; typeset -a APPLY
+  for line in "${SAVED[@]}"; do
+    [[ "$line" == "id:$wsm "* ]] && APPLY+=("$line")
+  done
+  if (( ! ${#APPLY[@]} )); then
+    echo "跳过恢复: 保存的配置里没有 WSM。"
+    return 1
+  fi
   # 保存的配置比当前在线屏少 = 保存时缺屏; 盲目恢复会把多出来的屏踢掉
   cur_n=$(displayplacer list 2>/dev/null | grep -c '^Persistent screen id:')
   cur_n=${cur_n:-0}
@@ -74,14 +95,8 @@ apply_saved() {
     echo "跳过恢复布局: 当前在线 $cur_n 块屏, 保存的配置只有 ${#SAVED[@]} 块（保存时不完整）。"
     return 1
   fi
-  displayplacer "${SAVED[@]}"
+  displayplacer "${APPLY[@]}"
 }
-
-if (( RESTORE )); then
-  [[ -f "$STATE" ]] || { echo "没有可恢复的配置: $STATE"; exit 1; }
-  apply_saved
-  exit $?
-fi
 
 command -v "$DDC" >/dev/null 2>&1 || { echo "缺少 $DDC: brew install $DDC"; exit 1; }
 
@@ -170,7 +185,7 @@ sec==1 && /mode [0-9]+:/ {
 }')
   [[ -z "$TABLE" ]] && return 1
 
-  local k a b c d e f g h
+  local k a b c d e f g h cand_hz cur_hz chosen
   while IFS='|' read -r k a b c d e f g h; do
     [[ -z "$k" ]] && continue
     if [[ "$k" == "D" ]]; then
@@ -178,11 +193,26 @@ sec==1 && /mode [0-9]+:/ {
       R[$a]=$b; HZ[$a]=$c; CD[$a]=$d; SC[$a]=$e; ORG[$a]=$f; ROT[$a]=$g
     elif [[ "$k" == "A" ]]; then
       # b=候选hz, c=候选scaling.
-      # 只用"同分辨率+同缩放、不同刷新率"的候选 (只调频率).
+      # 只调频率: 必须同分辨率 + 同缩放 (候选模式来自该屏自己的 EDID 模式表).
+      # 只允许向下换 (刷新率变低 = 像素时钟变小, 链路训练压力更小);
+      # 向上换可能直接训练失败, 把屏从链路踢掉. 优先 30/50 (两台机器实测有效),
+      # 否则取更低的档位里最低者; 没有更低的候选就跳过频率方案.
       # 同刷新率不同 scaling 的候选只有在 -s 时才考虑, 且不覆盖频率候选.
       if [[ "$b" != "${HZ[$a]:-}" && "$c" == "${SC[$a]:-}" ]]; then
-        if [[ "${ALTKIND[$a]:-}" != "hz" || "$b" == "30" || "$b" == "50" ]]; then
-          ALTHZ[$a]=$b; ALTSC[$a]=$c; ALTKIND[$a]=hz
+        cand_hz=${b%.*}; cur_hz=${HZ[$a]:-0}; cur_hz=${cur_hz%.*}
+        if (( cand_hz < cur_hz )); then
+          chosen=${ALTHZ[$a]:-}; chosen=${chosen%.*}
+          if (( cand_hz == 30 )); then
+            ALTHZ[$a]=$b; ALTSC[$a]=$c; ALTKIND[$a]=hz
+          elif [[ -z "$chosen" ]]; then
+            ALTHZ[$a]=$b; ALTSC[$a]=$c; ALTKIND[$a]=hz
+          elif (( chosen == 30 )); then
+            :   # 30 已是最稳的下限, 不再换
+          elif (( cand_hz == 50 )); then
+            ALTHZ[$a]=$b; ALTSC[$a]=$c; ALTKIND[$a]=hz
+          elif (( chosen != 50 )) && (( cand_hz < chosen )); then
+            ALTHZ[$a]=$b; ALTSC[$a]=$c; ALTKIND[$a]=hz
+          fi
         fi
       elif (( ALLOW_SCALING )) && [[ "$b" == "${HZ[$a]:-}" && "$c" != "${SC[$a]:-}" && -z "${ALTKIND[$a]:-}" ]]; then
         ALTHZ[$a]=$b; ALTSC[$a]=$c; ALTKIND[$a]=sc
@@ -197,15 +227,13 @@ sec==1 && /mode [0-9]+:/ {
 
   local WSM_UUID
   WSM_UUID=$(resolve_uuid)
+  WSM_UUID_G=$WSM_UUID
   # WSM 自己的备选模式类型: hz = 只调频率(老机器反复验证有效), sc = 改缩放(仅 -s)
+  # 只允许动 WSM 一块屏; 找不到 WSM 的备选模式就什么都别做 (不再拿别的屏兜底).
   WSM_ALT_KIND=""
   if [[ -n "$WSM_UUID" && -n "${ALTKIND[$WSM_UUID]:-}" ]]; then
     WSM_ALT_KIND="${ALTKIND[$WSM_UUID]}"
     targets=("$WSM_UUID")
-  else
-    for id in "${order[@]}"; do
-      [[ -n "${ALTKIND[$id]:-}" ]] && targets+=("$id")
-    done
   fi
 
   for id in "${order[@]}"; do
@@ -219,6 +247,13 @@ sec==1 && /mode [0-9]+:/ {
 }
 
 load_displays || { echo "displayplacer 未列出任何显示器。"; exit 1; }
+
+# --restore: 放在 load_displays 之后, apply_saved 需要 resolve_uuid 已定义.
+if (( RESTORE )); then
+  [[ -f "$STATE" ]] || { echo "没有可恢复的配置: $STATE"; exit 1; }
+  apply_saved
+  exit $?
+fi
 
 # 保存当前在线配置; 当前屏数比已保存的少(有屏不在线)时拒绝覆盖,
 # 否则会用残缺配置冲掉完整配置, 之后 --restore 反而把屏踢掉.
@@ -244,9 +279,10 @@ if (( SAVE )); then
   exit 0
 fi
 
-# 顺带处理其它屏: CG 能看到但 online=0 的, 先软件接回;
-# 接不回说明视频链路真的断了, 软件无解, 直接告诉用户怎么做.
-scan_other_displays() {
+# 只报告其它屏, 不做任何显示配置动作.
+# 11.27 实测: 对 sanguang(XSL) 写 DDC 电源后链路直接断; 11.26 实测全量配置也把它踹掉.
+# 这类屏的恢复只有物理断电, 任何软件动作都是在增加风险.
+report_other_displays() {
   local line cgid vend name
   [[ -x "$DPFIX" ]] || return 0
   for line in ${(f)"$("$DPFIX" list 2>/dev/null)"}; do
@@ -258,22 +294,11 @@ scan_other_displays() {
       0x0000626C|0x626C) name="sanguang(L32J1/XSL)" ;;
       *) name="厂商 $vend 的屏" ;;
     esac
-    if (( DRY )); then
-      echo "另有 $name（CG id $cgid）不在线；正式运行时会先尝试软件接回。"
-      continue
-    fi
-    echo "==> 另有 $name（CG id $cgid）不在线，尝试软件接回"
-    "$DPFIX" on "$cgid" >/dev/null 2>&1
-    sleep 2
-    if "$DPFIX" list 2>/dev/null | grep -q "^id=$cgid online=1"; then
-      echo "已接回 $name。"
-    else
-      echo "接不回 $name：它的视频链路已经断了（Mac 连 EDID 都读不到）。"
-      echo "   请拔掉它的电源线等 15 秒再插回（按电源键/快速插拔复位不了）。"
-    fi
+    echo "另有 $name（CG id $cgid）不在线；按边界不碰它。"
+    echo "   如果长期不亮，拔它的电源线等 15 秒再插回（按电源键/快速插拔复位不了）。"
   done
 }
-scan_other_displays
+report_other_displays
 
 # --- 0) 屏可能已被 macOS 移出列表: 先尝试软件重新接入 ---
 IDX=$(resolve_idx)
@@ -316,20 +341,35 @@ check_fixed() {
   [[ -n "$LUM" && "$LUM" -gt 0 ]]
 }
 
-# 模式重协商: 目标屏切到备选模式 3 秒再切回 (只调频率时是已验证的安全动作)
+# 模式重协商: WSM 切到备选模式 3 秒再切回.
+# 始终只把 WSM 一条传给 displayplacer (它只配置命令行列出的屏);
+# 绝不传全量配置 —— 11.26 实测全量会把脆弱的 sanguang 踹掉链路。
+# kind 只决定用哪种候选 (hz 换频率 / sc 换缩放), 两者都只动 WSM.
 retrain_mode() {
-  (( ${#targets[@]} )) || return 1
-  echo "==> 模式重协商 (${targets[*]})"
+  local kind=${1:-hz}
+  [[ -n "${WSM_UUID_G:-}" ]] || return 1
+  local e alt_entry="" cur_entry=""
+  for e in "${alt[@]}"; do
+    [[ "$e" == "id:$WSM_UUID_G "* ]] && alt_entry=$e
+  done
+  for e in "${cur[@]}"; do
+    [[ "$e" == "id:$WSM_UUID_G "* ]] && cur_entry=$e
+  done
+  [[ -n "$alt_entry" && -n "$cur_entry" && "$alt_entry" != "$cur_entry" ]] || return 1
   save_state >/dev/null || true
-  if displayplacer "${alt[@]}"; then
-    perl -e 'select(undef,undef,undef,3)'
-    displayplacer "${cur[@]}" || echo "切回原模式失败，请执行 displayplacer list 检查。"
+  if [[ "$kind" == "hz" ]]; then
+    echo "==> 换刷新率重协商（只动 WSM，其它屏不受影响）"
   else
-    echo "切换备选模式失败。"
-    return 1
+    echo "==> 缩放重协商（只动 WSM，其它屏不受影响）"
   fi
-  sleep 2
-  return 0
+  if displayplacer "$alt_entry"; then
+    perl -e 'select(undef,undef,undef,3)'
+    displayplacer "$cur_entry" || echo "切回原模式失败，请执行 displayplacer list 检查。"
+    sleep 2
+    return 0
+  fi
+  echo "切换备选模式失败。"
+  return 1
 }
 
 # --- 健康检查 ---
@@ -350,7 +390,7 @@ if (( FORCE )); then
     exit 1
   fi
   echo "强制模式: 跳过健康检查，直接做一次模式重协商（DDC 当前读数: ${LUM:-无响应}）。"
-  retrain_mode
+  retrain_mode hz
   if check_fixed; then
     echo "重协商完成（DDC 亮度 $LUM）。"
     exit 0
@@ -362,7 +402,7 @@ fi
 echo "检测到 WSM 显示器异常（DDC 读数: ${LUM:-无响应}）。"
 if (( DRY )); then
   [[ "$WSM_ALT_KIND" == "hz" ]] && echo "[dry-run] 会先试: 同分辨率换刷新率 (约 6~10 秒)"
-  echo "[dry-run] 然后依次: DDC 电源唤醒 -> 软件拔插 -> 缩放(仅-s) -> 断电重开提示"
+  echo "[dry-run] 然后依次: 软件拔插 -> 缩放(仅-s) -> 断电重开提示 (DDC 电源仅 --ddc-power)"
   (( ALLOW_SCALING )) && echo "[dry-run] -s: 允许 HiDPI <-> 1x 切换实验"
   exit 0
 fi
@@ -370,17 +410,17 @@ fi
 # 动手前保存当前配置, 成功后恢复布局/HiDPI (残缺配置不覆盖完整配置)
 save_state >/dev/null || true
 
-# --- 1) 快速路径: 同分辨率换刷新率 (老机器反复验证有效, 只调频率) ---
+# --- 1) 快速路径: 同分辨率换刷新率 (老机器反复验证有效, 只调频率, 只动 WSM) ---
 if [[ "$WSM_ALT_KIND" == "hz" ]]; then
-  retrain_mode
+  retrain_mode hz
   if check_fixed; then
     echo "已通过换刷新率唤醒（亮度 $LUM）。"
     exit 0
   fi
 fi
 
-# --- 2) DDC 电源唤醒 (DDC 通信已完全失效时跳过, 反正也会超时) ---
-if [[ "$DDC" == "m1ddc" && -n "${LUM:-}" ]]; then
+# --- 2) DDC 电源唤醒 (默认关闭; 11.27 实测电源寄存器写入会把脆弱屏的链路弄断) ---
+if (( DDC_POWER )) && [[ "$DDC" == "m1ddc" && -n "${LUM:-}" ]]; then
   echo "==> 尝试 DDC 电源唤醒 (set standby 1)"
   ddc_run m1ddc display "$IDX" set standby 1 >/dev/null || true
   sleep 3
@@ -409,8 +449,8 @@ if [[ -x "$DPFIX" ]]; then
 fi
 
 # --- 4) 其它重协商 (仅 -s 的缩放方案; 或本屏没有备选模式时调别的屏) ---
-if [[ "$WSM_ALT_KIND" == "sc" ]] || { [[ -z "$WSM_ALT_KIND" ]] && (( ${#targets[@]} > 0 )); }; then
-  retrain_mode
+if [[ "$WSM_ALT_KIND" == "sc" ]]; then
+  retrain_mode sc
   if check_fixed; then
     echo "重协商后已唤醒（亮度 $LUM）。"
     exit 0

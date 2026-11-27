@@ -2,12 +2,13 @@
 # wescom-watchdog — 每个亮屏周期自动检查所有外接屏, 卡死时快速恢复
 #
 # 亮屏后 5 秒开始, 每 3 秒一轮, 共查 90 秒:
-#   0. 熄屏 ≥20 分钟的唤醒: 先主动做一次换刷新率 (fix-wescom --force).
+#   0. 熄屏 ≥10 分钟的唤醒: 先主动做一次换刷新率 (fix-wescom --force).
 #      实测面板可能从唤醒起就是黑的, 但 DDC 仍返回旧亮度, 会骗过正常检测 20+ 秒.
-#   A. CG 里 online=0 的屏(在线时掉链路) -> 先试软件接回 wescom-dpfix on;
-#      接不回 = 视频链路真的断了 -> 立刻桌面通知, 这种只能关显示器电源再开/拔插视频线.
-#   B. WSM/wescom 屏 DDC 读不到(0/超时) 连续 3 次 -> fix-wescom -s
-#      (新版顺序: 同分辨率换刷新率 ~6-10 秒 -> DDC 唤醒 -> 软件拔插 -> 缩放仅-s).
+#   A. CG 里 online=0 的其它屏: 只记录/通知, 不做任何软件接回或显示配置动作.
+#      (11.27 实测: 对 sanguang 写 DDC 电源会立刻断链路; 11.26 全量配置也会.
+#       这类屏不归本服务管, 恢复只有物理断电.)
+#   B. 只对 WSM/wescom 屏动作: DDC 读不到(0/超时) 连续 3 次 -> fix-wescom -s
+#      (顺序: 同分辨率换刷新率 ~6-10 秒 -> 软件拔插 -> 缩放仅-s; DDC 电源默认不写).
 #   C. 修复失败 -> 桌面通知.
 #
 # 判据: 正常时 DDC 能读到亮度 (>0); 卡死时读 0 或通信失败.
@@ -25,7 +26,10 @@ CHECK_INTERVAL=3     # 亮屏检查窗口内的轮询间隔
 SCAN_EVERY=15        # offline 扫描最小间隔(秒)
 START_DELAY=5        # 亮屏后等待 DDC/链路就绪
 WINDOW=90            # 亮屏检查窗口(秒)
-PROACTIVE_MIN_OFF=1200   # 熄屏 ≥20 分钟的唤醒: 先主动重协商一次 (面板可能黑但 DDC 报假健康)
+OFFLINE_NOTIFY_GAP=3600  # 非 WSM 屏离线通知最小间隔(秒), 避免每次唤醒都弹
+PROACTIVE_MIN_OFF=600    # 熄屏 ≥10 分钟的唤醒: 先主动重协商一次 (面板可能黑但 DDC 报假健康)
+# 实测 2026-11-27 03:18 熄屏 1180 秒(19.7 分钟)后唤醒也犯了, 所以从 20 分钟下调到 10 分钟.
+# 10 分钟正好是系统熄屏时间; 更短的熄屏(秒级~几分钟)没犯过.
 ARCH=$(uname -m)
 
 if [[ "$ARCH" == "arm64" ]]; then
@@ -102,9 +106,10 @@ display_name_for_vendor() {
   esac
 }
 
-# 软件接回所有 CG 能看到但 offline 的屏 (WSM 由主流程处理)
-# 接不回的: 说明视频链路已经断了, 软件无解, 通知用户断电重开
-scan_offline() {
+# 非 WSM 屏 offline 时只记录/通知, 绝不尝试软件接回或任何显示配置动作.
+# 边界: 11.27 实测对 sanguang(XSL) 写 DDC 电源会立刻断链路; 11.26 全量配置同样.
+# 这类屏只能物理断电恢复, 软件动作只会增加风险.
+report_offline() {
   local line cgid vend name
   [[ -x "$DPFIX" ]] || return 0
   for line in ${(f)"$("$DPFIX" list 2>/dev/null)"}; do
@@ -113,16 +118,13 @@ scan_offline() {
     vend=${${line#*vendor=}%% *}
     [[ "$vend" == "0x00005E6D" ]] && continue   # WSM 走主流程
     name=$(display_name_for_vendor "$vend")
-    log "offline display $cgid $name -> try software reconnect"
-    "$DPFIX" on "$cgid" >/dev/null 2>&1
-    sleep 2
-    if "$DPFIX" list 2>/dev/null | grep -q "^id=$cgid online=1"; then
-      log "display $cgid reconnected"
-    else
-      log "display $cgid link down (software reconnect failed)"
-      if (( offline_notified == 0 )); then
-        offline_notified=1
-        notify "$name 掉线了（视频链路已断，软件接不回）。请拔掉它的电源线等 15 秒再插回；按电源键或马上插回都没用。"
+    if (( offline_notified == 0 )); then
+      offline_notified=1
+      log "offline non-WSM display $cgid $name -> not touched (boundary)"
+      # 每台机器每次唤醒都可能看到它; 通知限频, 避免刷屏
+      if (( now - last_offline_notify >= OFFLINE_NOTIFY_GAP )); then
+        last_offline_notify=$now
+        notify "$name 不在线（链路断了）。看护服务不会动它（软件接回会加重问题）；请拔它的电源线等 15 秒再插回。"
       fi
     fi
   done
@@ -168,6 +170,7 @@ saved=0
 pending_restore=0
 restore_deadline=0
 offline_notified=0
+last_offline_notify=0
 last_scan=0
 proactive=0
 off_secs=0
@@ -228,10 +231,10 @@ while true; do
       log "check window closed"
     elif (( now >= check_start )); then
 
-      # A. 掉链路的其它屏 (软件能接回就接, 接不回立刻通知)
+      # A. 其它屏 offline: 只记录/通知, 不做任何动作 (边界)
       if (( now - last_scan >= SCAN_EVERY )); then
         last_scan=$now
-        scan_offline
+        report_offline
       fi
 
       idx=$(resolve_idx)
