@@ -2,8 +2,9 @@
 # wescom-watchdog — 每个亮屏周期自动检查所有外接屏, 卡死时快速恢复
 #
 # 亮屏后 5 秒开始, 每 3 秒一轮, 共查 90 秒:
-#   0. 熄屏 ≥10 分钟的唤醒: 先主动做一次换刷新率 (fix-wescom --force).
-#      实测面板可能从唤醒起就是黑的, 但 DDC 仍返回旧亮度, 会骗过正常检测 20+ 秒.
+#   0. (默认关闭) 熄屏 ≥10 分钟的唤醒先主动重协商一次.
+#      2026-11-28 用户反馈: 正常唤醒也会被切两下, 加上唤醒本身看起来像"唤醒 3 次".
+#      现在不做预修复, 只靠 DDC 检测; 真卡死才修, 正常唤醒一次都不切.
 #   A. CG 里 online=0 的其它屏: 只记录/通知, 不做任何软件接回或显示配置动作.
 #      (11.27 实测: 对 sanguang 写 DDC 电源会立刻断链路; 11.26 全量配置也会.
 #       这类屏不归本服务管, 恢复只有物理断电.)
@@ -29,9 +30,8 @@ SCAN_EVERY=15        # offline 扫描最小间隔(秒)
 START_DELAY=5        # 亮屏后等待 DDC/链路就绪
 WINDOW=90            # 亮屏检查窗口(秒)
 OFFLINE_NOTIFY_GAP=3600  # 非 WSM 屏离线通知最小间隔(秒), 避免每次唤醒都弹
-PROACTIVE_MIN_OFF=600    # 熄屏 ≥10 分钟的唤醒: 先主动重协商一次 (面板可能黑但 DDC 报假健康)
-# 实测 2026-11-27 03:18 熄屏 1180 秒(19.7 分钟)后唤醒也犯了, 所以从 20 分钟下调到 10 分钟.
-# 10 分钟正好是系统熄屏时间; 更短的熄屏(秒级~几分钟)没犯过.
+PROACTIVE=0              # 预修复开关: 0 = 正常唤醒不动屏, 只在 DDC 转坏后修 (2026-11-28)
+PROACTIVE_MIN_OFF=600    # 仅 PROACTIVE=1 时生效: 熄屏 ≥10 分钟的唤醒先主动重协商一次
 ARCH=$(uname -m)
 
 if [[ "$ARCH" == "arm64" ]]; then
@@ -220,7 +220,7 @@ while true; do
     # 长睡唤醒: 面板可能从唤醒起就是黑的, 但 DDC 还一直返回旧亮度(实测能骗 20+ 秒).
     # 这种情况下等到 DDC 变坏再修要多花半分钟, 所以主动先做一次换刷新率.
     # on_age 用来排除"看护服务刚重启时把很久前的亮屏当成新唤醒".
-    if (( off_secs >= PROACTIVE_MIN_OFF && on_age <= 120 )); then
+    if (( PROACTIVE && off_secs >= PROACTIVE_MIN_OFF && on_age <= 120 )); then
       proactive=1
       log "long display sleep (${off_secs}s) -> proactive retrain planned"
     fi
