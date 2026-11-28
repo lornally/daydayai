@@ -1,0 +1,139 @@
+#!/bin/zsh
+# wescom-watchdog-os27 — os27 专用看护（只检测 + 通知）
+#
+# 与共享版（os15）的区别：
+#   - 只读 DDC 做检测；卡死时唯一的动作是用 dpfix off 把黑屏移出桌面，
+#     让 macOS 把窗口退回可用屏。绝不改分辨率、绝不把黑屏接回桌面、不改主屏。
+#   - os27 的 WSM(C3273IUY) 卡死时 DDC 全失效但 macOS 仍报 online；
+#     软件接回/拔插/模式切换/显示睡眠都无效；
+#     2026-11-28 验证：整机睡眠→完整唤醒可重置 DCP 并恢复（见 fix-wescom-os27 --sleep-wake）。
+#   - 看护不自动整机睡眠（会打断用户），只负责把黑屏移出桌面并提醒。
+#
+# 日志: /tmp/wescom-watchdog-os27.log
+
+set -u
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+LOG="/tmp/wescom-watchdog-os27.log"
+DPFIX="$HOME/.local/bin/wescom-dpfix"
+INTERVAL=10
+CHECK_INTERVAL=3
+START_DELAY=5
+WINDOW=300            # 唤醒后检查 5 分钟，覆盖“先亮几十秒再死”的情况
+BAD_LIMIT=3
+
+if ! command -v m1ddc >/dev/null 2>&1; then
+  echo "$(date '+%F %T') 缺少 m1ddc" >>"$LOG"
+  exit 1
+fi
+
+log() { echo "$(date '+%F %T') $*" >>"$LOG"; }
+ddc_run() { perl -e 'alarm 5; exec @ARGV' -- "$@" 2>/dev/null; }
+
+# 找 WSM 的 m1ddc 序号（按厂商匹配；序号会随显示重排变化）
+resolve_idx() {
+  local idx
+  idx=$(ddc_run m1ddc display list detailed | awk '
+    /^\[[0-9]+\] / { match($0,/^\[[0-9]+\]/); cur=substr($0,RSTART+1,RLENGTH-2); next }
+    /- Manufacturer:[ \t]*WSM/ { print cur; exit }')
+  print -r -- "${idx:-}"
+}
+
+read_lum() {
+  ddc_run m1ddc display "$1" get luminance | tr -dc '0-9'
+}
+
+notify() {
+  osascript -e "display notification \"$1\" with title \"wescom(WSM)\"" >/dev/null 2>&1 || true
+  log "notify: $1"
+}
+
+# 当前显示是亮还是灭（只看 pmset 最后一条）
+disp_state() {
+  local last
+  last=$(pmset -g log 2>/dev/null | grep -E 'Display is turned (on|off)' | tail -1)
+  case "$last" in
+    *"turned on"*) print on ;;
+    *)             print off ;;
+  esac
+}
+
+# 上次熄屏时长（秒），只用于日志
+off_secs() {
+  local ev off_line on_line off_ts on_ts off_e on_e
+  ev=$(pmset -g log 2>/dev/null | grep -E 'Display is turned (on|off)' | tail -2)
+  off_line=$(print -r -- "$ev" | grep 'turned off' | tail -1)
+  on_line=$(print -r -- "$ev" | grep 'turned on' | tail -1)
+  [[ -n "$off_line" && -n "$on_line" ]] || { print 0; return; }
+  off_ts=$(print -r -- "$off_line" | awk '{print $1" "$2}')
+  on_ts=$(print -r -- "$on_line" | awk '{print $1" "$2}')
+  off_e=$(date -j -f "%Y-%m-%d %H:%M:%S" "$off_ts" +%s 2>/dev/null) || { print 0; return; }
+  on_e=$(date -j -f "%Y-%m-%d %H:%M:%S" "$on_ts" +%s 2>/dev/null) || { print 0; return; }
+  (( on_e > off_e )) && print $(( on_e - off_e )) || print 0
+}
+
+prev=$(disp_state)      # 启动时按当前状态初始化，不把“现在亮着”当成一次新唤醒
+armed=0
+bad=0
+good=0
+notified=0
+check_start=0
+deadline=0
+
+while true; do
+  state=$(disp_state)
+  now=$(date +%s)
+
+  if [[ "$state" == "on" && "$prev" != "on" ]]; then
+    armed=1; bad=0; good=0; notified=0
+    check_start=$((now+START_DELAY))
+    deadline=$((now+WINDOW))
+    log "display on (off $(off_secs)s) -> checking WSM DDC for ${WINDOW}s"
+  fi
+  prev=$state
+
+  if [[ "$state" == "on" && "$armed" -eq 1 ]]; then
+    if (( now > deadline )); then
+      armed=0
+      log "check window closed (bad=$bad)"
+    elif (( now >= check_start )); then
+      idx=$(resolve_idx)
+      if [[ -z "$idx" ]]; then
+        lum=""
+      else
+        lum=$(read_lum "$idx")
+      fi
+
+      if [[ -z "$lum" || "$lum" -eq 0 ]]; then
+        bad=$((bad+1)); good=0
+        log "bad reading ${bad}/${BAD_LIMIT} (idx=${idx:-none} lum=${lum:-none})"
+      else
+        good=$((good+1))
+        # 连续 2 次健康才算恢复：卡死时 DDC 会好坏交替
+        if (( good >= 2 && bad > 0 )); then
+          log "health recovered (idx=$idx lum=$lum)"
+          bad=0
+        fi
+      fi
+
+      if (( bad >= BAD_LIMIT && notified == 0 )); then
+        armed=0; notified=1
+        log "WSM stuck: DDC dead"
+        # 唯一自动动作: 把黑屏移出桌面. 方向只会让窗口回到可用屏,
+        # 不改变可用屏的布局/主屏, 也不尝试唤醒这块屏.
+        line=""
+        [[ -x "$DPFIX" ]] && line=$("$DPFIX" find 2>/dev/null | awk '$2=="online=1"{print;exit}')
+        if [[ -n "$line" ]]; then
+          cgid=${line%% *}
+          "$DPFIX" off "$cgid" >/dev/null 2>&1
+          log "removed stuck WSM (CG id $cgid) from desktop; windows return to visible screens"
+          notify "wescom 卡死了（DDC 无响应）。已把它从桌面移除，窗口已回到可用屏。恢复：fix-wescom-os27 --sleep-wake"
+        else
+          notify "wescom 卡死了（DDC 无响应）。"
+        fi
+      fi
+    fi
+  fi
+
+  if (( armed )); then sleep $CHECK_INTERVAL; else sleep $INTERVAL; fi
+done

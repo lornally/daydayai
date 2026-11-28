@@ -1,0 +1,124 @@
+#!/bin/zsh
+# fix-wescom-os27 — os27 手动诊断/恢复（默认不做任何修改）
+#
+# 用法:
+#   fix-wescom-os27            诊断 WSM 状态（只读，不动任何显示配置）
+#   fix-wescom-os27 --sleep-wake  整机睡眠→完整唤醒，重置 DCP/DP 链路（已验证可恢复）
+#   fix-wescom-os27 --save     保存当前布局到 ~/.local/state/wescom-os27-config
+#   fix-wescom-os27 --restore  恢复保存的布局；WSM 仍是黑的时候拒绝执行
+#
+# 2026-11-28 实测：WSM 卡死（DDC 全失效、CG 只剩空壳）时，
+# 软件重新接入/拔插/模式切换/显示睡眠都无效；整机睡眠后完整唤醒
+# 会重置 DCP，WSM 自动重新枚举（DDC 50）。应用不会退出。
+# 本脚本默认不自动“修复”；任何会提交显示配置的动作都会搬动用户窗口。
+
+set -u
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+STATE="$HOME/.local/state/wescom-os27-config"
+DPFIX="$HOME/.local/bin/wescom-dpfix"
+
+command -v m1ddc >/dev/null 2>&1 || { echo "缺少 m1ddc: brew install m1ddc"; exit 1; }
+command -v displayplacer >/dev/null 2>&1 || { echo "缺少 displayplacer: brew install displayplacer"; exit 1; }
+
+ddc_run() { perl -e 'alarm 5; exec @ARGV' -- "$@" 2>/dev/null; }
+
+resolve_idx() {
+  local idx
+  idx=$(ddc_run m1ddc display list detailed | awk '
+    /^\[[0-9]+\] / { match($0,/^\[[0-9]+\]/); cur=substr($0,RSTART+1,RLENGTH-2); next }
+    /- Manufacturer:[ \t]*WSM/ { print cur; exit }')
+  print -r -- "${idx:-}"
+}
+
+read_lum() { ddc_run m1ddc display "$1" get luminance | tr -dc '0-9'; }
+
+wsm_ok() {
+  local idx lum
+  idx=$(resolve_idx)
+  [[ -n "$idx" ]] || return 1
+  lum=$(read_lum "$idx")
+  [[ -n "$lum" && "$lum" -gt 0 ]]
+}
+
+save_state() {
+  mkdir -p "${STATE:h}"
+  displayplacer list 2>/dev/null | awk '
+    /^Persistent screen id: / { id=$4; res="";hz="";cd="";sc="off";org="";rot="0";en="false"; next }
+    /^Resolution: /          { res=$2; next }
+    /^Hertz: /               { hz=$2; next }
+    /^Color Depth: /         { cd=$3; next }
+    /^Scaling: /             { sc=($2=="on")?"on":"off"; next }
+    /^Origin: /              { s=$0; sub(/^Origin: */,"",s); sub(/ *- main display$/,"",s); org=s; next }
+    /^Rotation: /            { rot=$2; next }
+    /^Enabled: /             { en=$2; next }
+    /^Resolutions for rotation/ {
+      if (en=="true") printf "id:%s res:%s hz:%s color_depth:%s scaling:%s origin:%s degree:%s\n", id,res,hz,cd,sc,org,rot
+      next
+    }' > "$STATE"
+  [[ -s "$STATE" ]]
+}
+
+case "${1:-}" in
+  --sleep-wake)
+    echo "整机睡眠 → 完整唤醒（约 20 秒，应用不会退出）..."
+    pmset sleepnow
+    # pmset 在 DarkWake 后返回；再拉一次完整唤醒
+    caffeinate -u -t 10
+    sleep 5
+    for i in {1..10}; do
+      if wsm_ok; then
+        echo "WSM 已恢复（DDC 亮度 $(read_lum "$(resolve_idx)")）。"
+        exit 0
+      fi
+      sleep 2
+    done
+    echo "睡眠唤醒后 WSM 仍无 DDC。"
+    exit 1
+    ;;
+  --save)
+    if save_state; then
+      echo "已保存当前布局到 $STATE"
+      cat "$STATE"
+    else
+      echo "保存失败：displayplacer 没有列出显示器。"
+      exit 1
+    fi
+    ;;
+  --restore)
+    [[ -s "$STATE" ]] || { echo "没有保存的布局: $STATE"; exit 1; }
+    if ! wsm_ok; then
+      echo "拒绝恢复：WSM 当前 DDC 无响应（还是黑的）。"
+      echo "黑屏时恢复布局会把主屏/窗口搬到看不见的屏上。"
+      echo "请先拔掉 WSM 电源线，等 15 秒再插回；它亮了以后再执行 --restore。"
+      exit 1
+    fi
+    echo "注意：这会提交三屏显示配置，窗口可能随显示位置移动。"
+    cfg=("${(@f)$(<"$STATE")}")
+    displayplacer "${cfg[@]}"
+    echo "已恢复保存的布局。"
+    ;;
+  "")
+    idx=$(resolve_idx)
+    lum=""
+    [[ -n "$idx" ]] && lum=$(read_lum "$idx")
+    if [[ -n "$lum" && "$lum" -gt 0 ]]; then
+      echo "WSM 正常（DDC 亮度 $lum，m1ddc 序号 $idx）。"
+      exit 0
+    fi
+    echo "WSM 卡死/未响应：DDC 读不到（m1ddc 序号 ${idx:-无}）。"
+    if [[ -x "$DPFIX" ]]; then
+      "$DPFIX" list 2>/dev/null | awk '$0 ~ /vendor=0x00005E6D/{print "CG: " $0}'
+    fi
+    echo
+    echo "恢复方法（已验证，不用拔线）：fix-wescom-os27 --sleep-wake"
+    echo "  整机睡眠再完整唤醒，重置 DCP/DP 链路；应用不会退出。"
+    echo "本命令只读，不会动分辨率/布局/窗口。"
+    exit 1
+    ;;
+  *)
+    echo "未知参数: $1"
+    echo "用法: fix-wescom-os27 [--sleep-wake|--save|--restore]"
+    exit 2
+    ;;
+esac
